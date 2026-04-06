@@ -12,15 +12,28 @@
     "default": true
   },
   "polisher_provider_id": {
-    "description": "独立模型",
-    "hint": "本插件专用独立 provider，用于审查、清洗、分段与复审。",
+    "description": "主模型",
+    "hint": "后处理主 provider，用于审查、清洗、分段、打回重写与复审。",
     "type": "string",
     "default": "",
     "_special": "select_provider"
   },
+  "secondary_provider_id": {
+    "description": "备用模型",
+    "hint": "主模型超时或失败后自动切换。备用模型也失败后，若开启分段则仅做本地分段。",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "post_process_timeout_seconds": {
+    "description": "单模型超时秒数",
+    "hint": "主模型与备用模型共用同一超时。任一阶段单次调用超过该时长即切换下一个模型；主备都失败后回退本地分段/原文。默认 30 秒。",
+    "type": "float",
+    "default": 30.0
+  },
   "enable_segment": {
     "description": "分段",
-    "hint": "是否启用分段。关闭后仅输出单段 clean_text。",
+    "hint": "是否启用分段。关闭后仅输出单段 clean_text；主备模型都失败时也不会做本地分段。",
     "type": "bool",
     "default": true
   },
@@ -115,7 +128,7 @@
     "description": "最终提示词",
     "hint": "支持占位符：{{judge_rule_block}} {{clean_rule_block}} {{segment_rule_block}} {{retry_rule_block}} {{placeholder_rule_block}} {{output_format_block}} {{user_message}} {{reply_text}}",
     "type": "text",
-    "default": "# 角色\n你是聊天回复后处理器，只负责在不改变原意的前提下，对候选回复进行必要处理。\n\n# 已知上下文\n- 用户消息：{{user_message}}\n- 候选回复：{{reply_text}}\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n{{retry_rule_block}}\n{{placeholder_rule_block}}\n\n## 输出格式\n{{output_format_block}}\n\n## 严格禁止\n- 不得歪曲原意\n- 不得偷换含义\n- 不得弱化、强化、扭曲原文情绪与立场\n- 不得补写原文没有的事实、设定、关系、动机、经历\n- 不得为了清洗、判别或分段而删除关键信息\n- 不得为了人设合规而把原文改成另一种意思\n- 不得新增原文不存在的人称、关系、设定、时间、地点、金额、数字、结论、承诺、经历\n- 不得删除或改写原文中的数字、URL、代码、引用片段、专有名词、时间信息\n- 未启用的功能，不得自行执行对应处理\n- 如果无法在当前已启用功能范围内安全处理，必须保守输出；仅在已启用判别与打回时，才允许返回 `reject_and_retry`\n- 不要输出 JSON 以外内容",
+    "default": "# 角色\n你是聊天回复后处理器，只负责在不改变原意的前提下，对候选回复进行必要处理。\n\n# 已知上下文\n- 用户消息：{{user_message}}\n- 候选回复：{{reply_text}}\n\n# 处理要求\n1. 如果候选回复属于不适合交给你继续后处理的主题类别，则不要执行清洗、改写、重写或主观审查式分段判断，并令 reason = \"内容涉及不适合主题，拒绝处理\"。\n2. 命中上述情况时，此要求优先于其他后处理规则；同时应保守返回，不得改写原意，不得删改事实内容。\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n{{retry_rule_block}}\n{{placeholder_rule_block}}\n\n## 输出格式\n{{output_format_block}}\n\n## 严格禁止\n- 不得歪曲原意\n- 不得偷换含义\n- 不得弱化、强化、扭曲原文情绪与立场\n- 不得补写原文没有的事实、设定、关系、动机、经历\n- 不得为了清洗、判别或分段而删除关键信息\n- 不得为了人设合规而把原文改成另一种意思\n- 不得新增原文不存在的人称、关系、设定、时间、地点、金额、数字、结论、承诺、经历\n- 不得删除或改写原文中的数字、URL、代码、引用片段、专有名词、时间信息\n- 未启用的功能，不得自行执行对应处理\n- 如果无法在当前已启用功能范围内安全处理，必须保守输出；仅在已启用判别与打回时，才允许返回 `reject_and_retry`\n- 不要输出 JSON 以外内容\n",
     "editor_mode": true,
     "editor_language": "markdown",
     "editor_theme": "vs-dark"
@@ -144,6 +157,17 @@
       "刚刚那句不太对 我重说",
       "唔 我整理一下再说"
     ]
+  },
+  "preserve_mode": {
+    "description": "保真校验等级",
+    "hint": "off：关闭校验，完全相信模型。basic：校验 URL、代码块、数字。strict：额外校验富媒体占位符，最保守。",
+    "type": "string",
+    "options": [
+      "off",
+      "basic",
+      "strict"
+    ],
+    "default": "basic"
   },
   "fallback_to_original_on_error": {
     "description": "异常回退",

@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,12 +13,18 @@ from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, register
 
 
+DEFAULT_FORCE_LOCAL_REASON = "内容涉及不适合主题，拒绝处理"
+
 DEFAULT_JUDGE_PROMPT = """# 角色
 你是聊天回复后处理器，只负责在不改变原意的前提下，对候选回复进行必要处理。
 
 # 已知上下文
 - 用户消息：{{user_message}}
 - 候选回复：{{reply_text}}
+
+# 处理要求
+1. 如果候选回复属于不适合交给你继续后处理的主题类别，则不要执行清洗、改写、重写或主观审查式分段判断，并令 reason = "内容涉及不适合主题，拒绝处理"。
+2. 命中上述情况时，此要求优先于其他后处理规则；同时应保守返回，不得改写原意，不得删改事实内容。
 
 {{judge_rule_block}}
 {{clean_rule_block}}
@@ -70,14 +77,16 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.0.0",
+    "1.2.4",
 )
-class ReplyPolisherPlugin(Star):
+class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
     CODE_FENCE_PATTERN = re.compile(r"```[\s\S]*?```")
     NUMBER_PATTERN = re.compile(r"\d+(?:[./:\-]\d+)*")
     MENTION_PATTERN = re.compile(r"(?<![\w@])@[A-Za-z0-9_\-\u4e00-\u9fff]+")
     PLACEHOLDER_PATTERN = re.compile(r"\[\[RP_COMP_\d+\]\]")
+    TRAILING_PLACEHOLDERS_PATTERN = re.compile(r"(?P<trailing>(?:\[\[RP_COMP_\d+\]\])+)+\s*$")
+    LOCAL_SPLIT_PATTERN = re.compile(r"([。！？?!；;\n]+)")
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -92,8 +101,27 @@ class ReplyPolisherPlugin(Star):
     def _cfg(self, key: str, default=None):
         return self.config.get(key, default)
 
-    def _polisher_provider_id(self) -> str:
+    def _primary_provider_id(self) -> str:
         return str(self._cfg("polisher_provider_id", "") or "").strip()
+
+    def _secondary_provider_id(self) -> str:
+        return str(self._cfg("secondary_provider_id", "") or "").strip()
+
+    def _post_process_timeout_seconds(self) -> float:
+        try:
+            timeout = float(self._cfg("post_process_timeout_seconds", 30.0) or 30.0)
+        except Exception:
+            timeout = 30.0
+        if timeout <= 0:
+            return 30.0
+        return timeout
+
+    def _provider_candidates(self) -> List[str]:
+        providers: List[str] = []
+        for item in [self._primary_provider_id(), self._secondary_provider_id()]:
+            if item and item not in providers:
+                providers.append(item)
+        return providers
 
     def _debug(self, message: str):
         if self._cfg("debug_log", False):
@@ -117,8 +145,23 @@ class ReplyPolisherPlugin(Star):
     def _any_post_process_enabled(self) -> bool:
         return any([self._review_enabled(), self._clean_enabled(), self._segment_enabled()])
 
-    def _preserve_guard_enabled(self) -> bool:
-        return self._any_post_process_enabled()
+    def _preserve_mode(self) -> str:
+        mode = str(self._cfg("preserve_mode", "basic") or "basic").strip().lower()
+        if mode not in {"off", "basic", "strict"}:
+            return "basic"
+        return mode
+
+    def _forced_local_reason(self) -> str:
+        return str(self._cfg("force_local_fallback_reason", DEFAULT_FORCE_LOCAL_REASON) or DEFAULT_FORCE_LOCAL_REASON).strip()
+
+    def _should_force_local_fallback(self, judge_data: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(judge_data, dict):
+            return False
+        expected = self._forced_local_reason()
+        if not expected:
+            return False
+        reason = str(judge_data.get("reason") or "").strip()
+        return reason == expected
 
     def _get_session_key(self, event: AstrMessageEvent) -> str:
         return str(getattr(event, "unified_msg_origin", "") or "global")
@@ -220,9 +263,6 @@ class ReplyPolisherPlugin(Star):
             return data if isinstance(data, dict) else None
         return None
 
-    def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
-        return self._extract_json_object(text)
-
     def _render_template(self, template: str, values: Dict[str, Any]) -> str:
         text = template or ""
         for key, value in values.items():
@@ -240,6 +280,57 @@ class ReplyPolisherPlugin(Star):
         s = re.sub(r"[ \t]+", " ", s)
         s = re.sub(r"\n{3,}", "\n\n", s)
         return s.strip()
+
+    def _normalized_compare_text_ignore_segment_breaks(self, text: str) -> str:
+        s = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r"\n+", "", s)
+        return s.strip()
+
+    def _strip_placeholders(self, text: str) -> str:
+        return self.PLACEHOLDER_PATTERN.sub("", str(text or ""))
+
+    def _extract_trailing_placeholders(self, text: str) -> Tuple[str, List[str]]:
+        source = str(text or "")
+        match = self.TRAILING_PLACEHOLDERS_PATTERN.search(source)
+        if not match:
+            return source, []
+        trailing_text = match.group("trailing") or ""
+        body = source[: match.start("trailing")]
+        placeholders = self.PLACEHOLDER_PATTERN.findall(trailing_text)
+        return body, placeholders
+
+    def _try_restore_trailing_placeholders(self, original_text: str, segments: List[str]) -> List[str]:
+        if not segments:
+            return segments
+
+        original_body, trailing_placeholders = self._extract_trailing_placeholders(original_text)
+        if not trailing_placeholders:
+            return segments
+
+        candidate_text = "\n".join(str(seg or "") for seg in segments if str(seg or "").strip())
+        if not candidate_text.strip():
+            return segments
+
+        if any(ph in candidate_text for ph in trailing_placeholders):
+            return segments
+
+        original_plain = self._normalized_compare_text_ignore_segment_breaks(self._strip_placeholders(original_body))
+        candidate_plain = self._normalized_compare_text_ignore_segment_breaks(self._strip_placeholders(candidate_text))
+        if original_plain != candidate_plain:
+            return segments
+
+        restored = [str(seg or "") for seg in segments]
+        trailing_text = "".join(trailing_placeholders)
+        for idx in range(len(restored) - 1, -1, -1):
+            if restored[idx].strip():
+                restored[idx] = f"{restored[idx]}{trailing_text}"
+                self._warn(
+                    f"检测到模型遗漏尾部占位符，已自动补回到最后一段。placeholders={trailing_placeholders}"
+                )
+                return restored
+
+        return segments
 
     def _build_fallback_segments_from_text(self, text: str) -> List[str]:
         source = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -280,6 +371,68 @@ class ReplyPolisherPlugin(Star):
 
         return normalized
 
+    def _reinject_placeholders_into_segments(self, segments: List[str], clean_text: str) -> Optional[List[str]]:
+        if not segments:
+            return None
+        if not clean_text or not self.PLACEHOLDER_PATTERN.search(clean_text):
+            return None
+
+        clean_source = str(clean_text)
+        cursor = 0
+        rebuilt: List[str] = []
+
+        for seg in segments:
+            seg_text = str(seg or "")
+            plain_target = self._strip_placeholders(seg_text)
+            built = ""
+            matched_plain = ""
+
+            while cursor < len(clean_source):
+                placeholder_match = self.PLACEHOLDER_PATTERN.match(clean_source, cursor)
+                if placeholder_match:
+                    built += placeholder_match.group(0)
+                    cursor = placeholder_match.end()
+                    continue
+
+                if len(matched_plain) >= len(plain_target):
+                    break
+
+                current_char = clean_source[cursor]
+                expected_char = plain_target[len(matched_plain)]
+                if current_char != expected_char:
+                    return None
+                built += current_char
+                matched_plain += current_char
+                cursor += 1
+
+                if matched_plain == plain_target:
+                    while cursor < len(clean_source):
+                        tail_placeholder = self.PLACEHOLDER_PATTERN.match(clean_source, cursor)
+                        if not tail_placeholder:
+                            break
+                        built += tail_placeholder.group(0)
+                        cursor = tail_placeholder.end()
+                    break
+
+            if matched_plain != plain_target:
+                return None
+
+            rebuilt.append(built.strip())
+
+        remainder = clean_source[cursor:]
+        if remainder and remainder.strip():
+            if rebuilt:
+                rebuilt[-1] = f"{rebuilt[-1]}{remainder}"
+            else:
+                rebuilt.append(remainder.strip())
+
+        joined_rebuilt_plain = self._normalized_compare_text_ignore_segment_breaks(self._strip_placeholders("\n".join(rebuilt)))
+        clean_plain = self._normalized_compare_text_ignore_segment_breaks(self._strip_placeholders(clean_source))
+        if joined_rebuilt_plain != clean_plain:
+            return None
+
+        return [item for item in rebuilt if item]
+
     def _normalize_segments(self, data: Dict[str, Any], fallback_text: str) -> List[str]:
         clean_text = str(data.get("clean_text") or "").strip()
         if not self._segment_enabled():
@@ -299,7 +452,11 @@ class ReplyPolisherPlugin(Star):
         if normalized:
             if clean_text:
                 joined_segments = "\n".join(normalized)
-                if self._normalized_compare_text(joined_segments) != self._normalized_compare_text(clean_text):
+                if self._normalized_compare_text_ignore_segment_breaks(joined_segments) != self._normalized_compare_text_ignore_segment_breaks(clean_text):
+                    reinjected = self._reinject_placeholders_into_segments(normalized, clean_text)
+                    if reinjected:
+                        self._warn("segments 与 clean_text 存在占位符差异，已自动回填占位符并保留分段")
+                        return self._apply_segment_limits(reinjected, clean_text or fallback_text)
                     self._warn("segments 与 clean_text 存在可见差异，已优先信任 clean_text 并回退为本地单段")
                     return self._build_fallback_segments_from_text(clean_text)
             return self._apply_segment_limits(normalized, clean_text or fallback_text)
@@ -321,19 +478,28 @@ class ReplyPolisherPlugin(Star):
     def _normalize_number_token(self, token: str) -> str:
         return re.sub(r"\D", "", token or "")
 
-    def _collect_guard_tokens(self, text: str) -> Dict[str, List[str]]:
+    def _collect_guard_tokens(self, text: str, mode: str) -> Dict[str, List[str]]:
         source = text or ""
-        numbers = [item for item in self.NUMBER_PATTERN.findall(source) if any(ch.isdigit() for ch in item)]
-        return {
+        source_without_placeholders = self._strip_placeholders(source)
+        numbers = [
+            item
+            for item in self.NUMBER_PATTERN.findall(source_without_placeholders)
+            if any(ch.isdigit() for ch in item)
+        ]
+        tokens = {
             "URL": list(dict.fromkeys(self.URL_PATTERN.findall(source))),
             "代码块": list(dict.fromkeys(self.CODE_FENCE_PATTERN.findall(source))),
             "数字串": list(dict.fromkeys(numbers)),
             "提及": list(dict.fromkeys(self.MENTION_PATTERN.findall(source))),
-            "占位符": list(dict.fromkeys(self.PLACEHOLDER_PATTERN.findall(source))),
+            "占位符": [],
         }
+        if mode == "strict":
+            tokens["占位符"] = list(dict.fromkeys(self.PLACEHOLDER_PATTERN.findall(source)))
+        return tokens
 
     def _validate_preserved_content(self, original_text: str, candidate_segments: List[str]) -> bool:
-        if not self._preserve_guard_enabled():
+        mode = self._preserve_mode()
+        if mode == "off":
             return True
 
         original = str(original_text or "")
@@ -341,7 +507,7 @@ class ReplyPolisherPlugin(Star):
         if not original.strip() or not candidate.strip():
             return True
 
-        protected = self._collect_guard_tokens(original)
+        protected = self._collect_guard_tokens(original, mode)
         hard_missing: List[str] = []
         soft_missing: List[str] = []
 
@@ -356,31 +522,67 @@ class ReplyPolisherPlugin(Star):
             if normalized and normalized not in normalized_candidate_code:
                 hard_missing.append(f"代码块:{normalized[:80]}")
 
-        candidate_numbers = {self._normalize_number_token(x) for x in self.NUMBER_PATTERN.findall(candidate) if x}
+        candidate_numbers = {self._normalize_number_token(x) for x in self.NUMBER_PATTERN.findall(self._strip_placeholders(candidate)) if x}
         for token in protected.get("数字串", []):
             normalized = self._normalize_number_token(token)
             if normalized and normalized not in candidate_numbers:
                 hard_missing.append(f"数字串:{token[:80]}")
 
-        for token in protected.get("占位符", []):
-            if token and token not in candidate:
-                hard_missing.append(f"占位符:{token[:80]}")
+        if mode == "strict":
+            for token in protected.get("占位符", []):
+                if token and token not in candidate:
+                    hard_missing.append(f"占位符:{token[:80]}")
 
         for token in protected.get("提及", []):
             if token and token not in candidate:
                 soft_missing.append(f"提及:{token[:80]}")
 
         if hard_missing:
-            self._warn(f"保真校验未通过，已回退原文。硬缺失要素={hard_missing[:8]}")
+            self._warn(f"保真校验未通过，已回退原文。mode={mode}, 硬缺失要素={hard_missing[:8]}")
             return False
 
         if soft_missing:
-            self._warn(f"保真校验提示：检测到可容忍缺失要素={soft_missing[:8]}")
+            self._warn(f"保真校验提示：mode={mode}, 检测到可容忍缺失要素={soft_missing[:8]}")
         return True
 
     async def _call_llm(self, provider_id: str, prompt: str) -> str:
         llm_resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
         return (getattr(llm_resp, "completion_text", "") or "").strip()
+
+    async def _call_llm_with_fallback(self, prompt: str, stage: str) -> Tuple[str, Optional[str], float, bool]:
+        providers = self._provider_candidates()
+        if not providers:
+            self._debug(f"{stage} 未配置主模型，跳过处理")
+            return "", None, 0.0, True
+
+        total_elapsed = 0.0
+        timeout_seconds = self._post_process_timeout_seconds()
+        last_error = ""
+
+        for index, provider_id in enumerate(providers, start=1):
+            started_at = time.perf_counter()
+            try:
+                text = await asyncio.wait_for(self._call_llm(provider_id, prompt), timeout=timeout_seconds)
+                elapsed = time.perf_counter() - started_at
+                total_elapsed += elapsed
+                if index > 1:
+                    self._info(f"{stage} 已切换到备用模型 provider={provider_id}，耗时 {elapsed:.2f}s")
+                return text, provider_id, total_elapsed, False
+            except asyncio.TimeoutError:
+                elapsed = time.perf_counter() - started_at
+                total_elapsed += elapsed
+                last_error = f"timeout {elapsed:.2f}s"
+                self._warn(
+                    f"{stage} 主链模型调用超时：provider={provider_id}, timeout={timeout_seconds:.2f}s"
+                )
+            except Exception as e:
+                elapsed = time.perf_counter() - started_at
+                total_elapsed += elapsed
+                last_error = str(e)
+                self._warn(f"{stage} 模型调用失败：provider={provider_id}, error={e}")
+
+        self._warn(f"{stage} 主备模型均不可用，进入本地处理。last_error={last_error[:200]}")
+        return "", None, total_elapsed, True
 
     def _build_segment_count_rule_text(self) -> str:
         if not bool(self._cfg("enable_segment_count_range", False)):
@@ -412,7 +614,7 @@ class ReplyPolisherPlugin(Star):
                 "{\n"
                 '  "action": "accept 或 reject_and_retry",\n'
                 '  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",\n'
-                '  "reason": "简短原因",\n'
+                f'  "reason": "简短原因；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
                 '  "clean_text": "清洗后的完整文本",\n'
                 '  "segments": ["分段1", "分段2"],\n'
                 '  "confidence": 0.0\n'
@@ -423,7 +625,7 @@ class ReplyPolisherPlugin(Star):
             "{\n"
             '  "action": "accept 或 reject_and_retry",\n'
             '  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",\n'
-            '  "reason": "简短原因",\n'
+            f'  "reason": "简短原因；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
             '  "clean_text": "清洗后的完整文本",\n'
             '  "confidence": 0.0\n'
             "}"
@@ -455,7 +657,9 @@ class ReplyPolisherPlugin(Star):
         clean_prompt_input = str(self._cfg("clean_prompt_template", "") or "").strip()
         return (
             "## 清洗规则\n"
-            "清洗仅允许做格式、符号、空行、错别字、异体字、繁简体、非术语英文等下方列出的层面的修正；不得改变原意，不得新增、删除、改写事实信息。\n\n"
+            "清洗的目标，不只是做表面整理，而是在不改变原意、不新增事实、不删减关键信息的前提下，把不适合直接发送的表达修正为适合直接发送的表达。\n"
+            "允许处理的方向包括：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。\n"
+            "但这种修整仅限于让表达更可直接发送，不得改变原意，不得偷换语气立场，不得新增、删减、编造事实内容。\n\n"
             f"{clean_prompt_input}"
         ).strip()
 
@@ -482,19 +686,244 @@ class ReplyPolisherPlugin(Star):
             "当问题严重且无法在不改变原意的前提下直接修复时，返回 `reject_and_retry`。重写时仍必须保持原意，不得借机二次创作。"
         )
 
+    def _local_split_target_length(self, text: str) -> int:
+        source = str(text or "")
+        visible = self._strip_placeholders(source)
+        text_len = len(visible.strip())
+        if text_len <= 0:
+            return 0
+
+        if bool(self._cfg("enable_segment_count_range", False)):
+            max_seg = self._safe_int(self._cfg("max_segments", 5) or 5, 5)
+            if max_seg > 1:
+                return max(12, text_len // max_seg + (1 if text_len % max_seg else 0))
+
+        pref = str(self._cfg("segment_preference", "humanized") or "humanized").strip().lower()
+        if pref == "balanced":
+            if text_len <= 24:
+                return 0
+            return max(12, min(36, text_len // 3 + (1 if text_len % 3 else 0)))
+        if pref == "off":
+            return 0
+        if text_len <= 36:
+            return 0
+        return 18
+
+    def _local_is_atomic_token(self, token: str) -> bool:
+        if not token:
+            return False
+        return bool(
+            self.CODE_FENCE_PATTERN.fullmatch(token)
+            or self.URL_PATTERN.fullmatch(token)
+            or self.PLACEHOLDER_PATTERN.fullmatch(token)
+        )
+
+    def _local_tokenize(self, text: str) -> List[str]:
+        source = str(text or "")
+        if not source:
+            return []
+
+        pattern = re.compile(
+            f"({self.CODE_FENCE_PATTERN.pattern}|{self.URL_PATTERN.pattern}|{self.PLACEHOLDER_PATTERN.pattern})",
+            re.IGNORECASE,
+        )
+        tokens: List[str] = []
+        last = 0
+        for match in pattern.finditer(source):
+            start, end = match.span()
+            if start > last:
+                tokens.append(source[last:start])
+            tokens.append(match.group(0))
+            last = end
+        if last < len(source):
+            tokens.append(source[last:])
+        return [token for token in tokens if token]
+
+    def _split_large_local_segment(self, text: str, target_length: int) -> List[str]:
+        source = str(text or "").strip()
+        if not source:
+            return []
+        if target_length <= 0 or len(self._strip_placeholders(source)) <= max(target_length * 2, 48):
+            return [source]
+
+        pieces = re.split(r"([，,、：:；;])", source)
+        if len(pieces) <= 1:
+            return [source]
+
+        segments: List[str] = []
+        current = ""
+        for piece in pieces:
+            if not piece:
+                continue
+            candidate = f"{current}{piece}"
+            visible_len = len(self._strip_placeholders(candidate).strip())
+            if current and visible_len >= target_length:
+                segments.append(current.strip())
+                current = piece
+            else:
+                current = candidate
+        if current.strip():
+            segments.append(current.strip())
+
+        normalized = [seg for seg in segments if seg]
+        return normalized or [source]
+
+    def _merge_local_short_segments(self, segments: List[str], target_length: int) -> List[str]:
+        normalized = [str(seg or "").strip() for seg in segments if str(seg or "").strip()]
+        if not normalized:
+            return []
+
+        min_len = 6 if target_length <= 0 else max(6, min(12, target_length // 3))
+        merged: List[str] = []
+        for seg in normalized:
+            visible_len = len(self._strip_placeholders(seg).strip())
+            if merged and visible_len < min_len:
+                connector = "" if re.match(r"^[。！？?!；;，,、：:]", seg) else "\n"
+                merged[-1] = f"{merged[-1]}{connector}{seg}".strip()
+            else:
+                merged.append(seg)
+
+        if len(merged) >= 2 and len(self._strip_placeholders(merged[0]).strip()) < min_len:
+            merged[1] = f"{merged[0]}\n{merged[1]}".strip()
+            merged = merged[1:]
+
+        return merged
+
+    def _local_split_text(self, text: str) -> List[str]:
+        source = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not source:
+            return []
+        if not self._segment_enabled():
+            return [source]
+
+        target_length = self._local_split_target_length(source)
+        tokens = self._local_tokenize(source)
+        if not tokens:
+            return [source]
+
+        segments: List[str] = []
+        current = ""
+        stack: List[str] = []
+        quote_chars = {'"', "'", '`'}
+        pair_map = {
+            '“': '”',
+            '《': '》',
+            '（': '）',
+            '(': ')',
+            '[': ']',
+            '{': '}',
+            '‘': '’',
+            '【': '】',
+            '<': '>',
+        }
+
+        def flush_current():
+            nonlocal current
+            seg = current.strip()
+            if seg:
+                segments.append(seg)
+            current = ""
+
+        def append_and_maybe_split(delimiter: str):
+            nonlocal current
+            current += delimiter
+            visible_len = len(self._strip_placeholders(current).strip())
+            if delimiter.count("\n") >= 2:
+                flush_current()
+                return
+            if re.fullmatch(r"[。！？?!；;]+", delimiter or ""):
+                if target_length <= 0 or visible_len >= max(8, target_length // 2):
+                    flush_current()
+                return
+            if "\n" in delimiter and visible_len >= max(12, target_length or 18):
+                flush_current()
+
+        for token in tokens:
+            if self._local_is_atomic_token(token):
+                current += token
+                continue
+
+            i = 0
+            while i < len(token):
+                if token.startswith("\n\n", i) and not stack:
+                    append_and_maybe_split("\n\n")
+                    i += 2
+                    while i < len(token) and token[i] == "\n":
+                        i += 1
+                    continue
+
+                char = token[i]
+                if char in quote_chars:
+                    if stack and stack[-1] == char:
+                        stack.pop()
+                    else:
+                        stack.append(char)
+                    current += char
+                    i += 1
+                    continue
+
+                if stack:
+                    expected = pair_map.get(stack[-1])
+                    if char == expected:
+                        stack.pop()
+                    elif char in pair_map and char not in quote_chars:
+                        stack.append(char)
+                    current += char
+                    i += 1
+                    continue
+
+                if char in pair_map:
+                    stack.append(char)
+                    current += char
+                    i += 1
+                    continue
+
+                strong_match = re.match(r"[。！？?!；;]+", token[i:])
+                if strong_match:
+                    delimiter = strong_match.group(0)
+                    append_and_maybe_split(delimiter)
+                    i += len(delimiter)
+                    continue
+
+                if char == "\n":
+                    append_and_maybe_split("\n")
+                    i += 1
+                    continue
+
+                current += char
+                i += 1
+
+        if current.strip():
+            segments.append(current.strip())
+
+        if not segments:
+            segments = [source]
+
+        normalized: List[str] = []
+        for seg in segments:
+            normalized.extend(self._split_large_local_segment(seg, target_length))
+
+        normalized = self._merge_local_short_segments(normalized, target_length)
+        return self._apply_segment_limits(normalized or [source], source)
+
+    def _local_process_segments(self, text: str) -> List[str]:
+        if not self._segment_enabled():
+            return [str(text or "").strip()] if str(text or "").strip() else []
+        return self._local_split_text(text)
+
     async def _judge_reply(
         self,
         event: AstrMessageEvent,
         reply_text: str,
         reject_reason: str = "",
-    ) -> Optional[Dict[str, Any]]:
-        provider_id = self._polisher_provider_id()
-        if not provider_id:
-            self._debug("未配置 polisher_provider_id，跳过处理")
-            return None
+    ) -> Tuple[Optional[Dict[str, Any]], float, bool]:
+        providers = self._provider_candidates()
+        if not providers:
+            self._debug("未配置主模型，跳过处理")
+            return None, 0.0, True
 
         if not self._any_post_process_enabled():
-            return {"action": "accept", "clean_text": reply_text, "segments": [reply_text]}
+            return {"action": "accept", "clean_text": reply_text, "segments": [reply_text]}, 0.0, False
 
         values = {
             "reply_text": reply_text,
@@ -512,40 +941,29 @@ class ReplyPolisherPlugin(Star):
             values,
         )
         self._debug(f"审查模型输入={prompt[:3000]}")
-        result_text = await self._call_llm(provider_id, prompt)
-        self._debug(f"审查模型原始输出={result_text[:3000]}")
-        parsed = self._extract_json(result_text)
+        result_text, provider_id, elapsed, exhausted = await self._call_llm_with_fallback(prompt, stage="后处理审查")
+        if exhausted:
+            return None, elapsed, True
+        self._debug(f"审查模型原始输出 provider={provider_id} output={result_text[:3000]}")
+        parsed = self._extract_json_object(result_text)
         if not parsed:
             self._warn("审查模型未返回可解析 JSON，本次后处理已跳过")
-            return None
-        return parsed
+            return None, elapsed, False
+        return parsed, elapsed, False
 
     async def _retry_generate(
         self,
         event: AstrMessageEvent,
         reply_text: str,
         reject_reason: str,
-    ) -> str:
+    ) -> Tuple[str, float, bool]:
         if not self._review_enabled():
-            return ""
+            return "", 0.0, False
 
-        provider_id = None
-        try:
-            provider = self.context.get_using_provider(event.unified_msg_origin)
-            if provider:
-                provider_id = provider.meta().id
-        except Exception as e:
-            logger.debug(f"[ReplyPolisher] get_using_provider 获取失败，尝试回退: {e}")
-
-        if not provider_id:
-            try:
-                provider_id = await self.context.get_current_chat_provider_id(umo=event.unified_msg_origin)
-            except Exception as e:
-                logger.warning(f"[ReplyPolisher] 获取当前对话模型 provider_id 失败: {e}")
-                return ""
-
-        if not provider_id:
-            return ""
+        providers = self._provider_candidates()
+        if not providers:
+            self._debug("未配置主模型，跳过重写")
+            return "", 0.0, True
 
         values = {
             "reply_text": reply_text,
@@ -562,12 +980,14 @@ class ReplyPolisherPlugin(Star):
         )
         self._debug(f"打回重写输入={prompt[:3000]}")
         try:
-            text = await self._call_llm(provider_id, prompt)
-            self._debug(f"打回重写原始输出={text[:3000]}")
-            return text
+            text, provider_id, elapsed, exhausted = await self._call_llm_with_fallback(prompt, stage="打回重写")
+            if exhausted:
+                return "", elapsed, True
+            self._debug(f"打回重写原始输出 provider={provider_id} output={text[:3000]}")
+            return text, elapsed, False
         except Exception as e:
             logger.warning(f"[ReplyPolisher] 打回重生成失败: {e}")
-            return ""
+            return "", 0.0, True
 
     async def _send_retry_notice(self, event: AstrMessageEvent):
         if not bool(self._cfg("enable_retry_notice", False)):
@@ -700,36 +1120,51 @@ class ReplyPolisherPlugin(Star):
             if delay > 0:
                 await asyncio.sleep(delay)
 
-    async def _process_reply(self, event: AstrMessageEvent, original_text: str) -> Optional[List[str]]:
-        judge_data = await self._judge_reply(event, original_text)
+    async def _process_reply(self, event: AstrMessageEvent, original_text: str) -> Tuple[Optional[List[str]], float, str]:
+        total_model_elapsed = 0.0
+
+        judge_data, elapsed, exhausted = await self._judge_reply(event, original_text)
+        total_model_elapsed += elapsed
+        if exhausted:
+            return self._local_process_segments(original_text), total_model_elapsed, "local_after_judge_timeout"
         if not judge_data:
-            return None
+            return None, total_model_elapsed, "skip"
+        if self._should_force_local_fallback(judge_data):
+            self._warn(f"审查模型命中特殊拒绝原因，已忽略模型结果并回退本地分段。reason={self._forced_local_reason()}")
+            return self._local_process_segments(original_text), total_model_elapsed, "local_forced_by_reason"
 
         action = str(judge_data.get("action") or "accept").strip().lower()
         reason = str(judge_data.get("reason") or "").strip()
         self._debug(f"初审 action={action}, reason={reason}")
 
         first_pass_segments = self._normalize_segments(judge_data, original_text)
+        first_pass_segments = self._try_restore_trailing_placeholders(original_text, first_pass_segments)
         if action != "reject_and_retry":
             if self._validate_preserved_content(original_text, first_pass_segments):
-                return first_pass_segments
-            return [original_text]
+                return first_pass_segments, total_model_elapsed, "accept"
+            return [original_text], total_model_elapsed, "accept_but_reverted"
 
         if not self._review_enabled():
             if self._validate_preserved_content(original_text, first_pass_segments):
-                return first_pass_segments
-            return [original_text]
+                return first_pass_segments, total_model_elapsed, "review_disabled"
+            return [original_text], total_model_elapsed, "review_disabled_reverted"
 
         first_pass_fallback = first_pass_segments if self._validate_preserved_content(original_text, first_pass_segments) else [original_text]
 
         await self._send_retry_notice(event)
-        regenerated = await self._retry_generate(event, original_text, reason)
-        if not regenerated:
-            return first_pass_fallback or [original_text]
+        regenerated, elapsed, exhausted = await self._retry_generate(event, original_text, reason)
+        total_model_elapsed += elapsed
+        if exhausted or not regenerated:
+            base_text = "\n\n".join(first_pass_fallback).strip() or original_text
+            return self._local_process_segments(base_text), total_model_elapsed, "local_after_retry_timeout"
 
-        second_judge = await self._judge_reply(event, regenerated, reject_reason=reason)
-        if not second_judge:
-            return first_pass_fallback or [original_text]
+        second_judge, elapsed, exhausted = await self._judge_reply(event, regenerated, reject_reason=reason)
+        total_model_elapsed += elapsed
+        if exhausted or not second_judge:
+            return self._local_process_segments(regenerated), total_model_elapsed, "local_after_rejudge_timeout"
+        if self._should_force_local_fallback(second_judge):
+            self._warn(f"复审模型命中特殊拒绝原因，已忽略模型结果并回退本地分段。reason={self._forced_local_reason()}")
+            return self._local_process_segments(regenerated), total_model_elapsed, "local_forced_by_rejudge_reason"
 
         second_action = str(second_judge.get("action") or "accept").strip().lower()
         second_reason = str(second_judge.get("reason") or "").strip()
@@ -737,21 +1172,28 @@ class ReplyPolisherPlugin(Star):
 
         if second_action == "reject_and_retry":
             self._warn("重生成结果复审仍未通过，已回退为首轮结果/原始回复，避免发送二次判退文本")
-            return first_pass_fallback or [original_text]
+            return first_pass_fallback or [original_text], total_model_elapsed, "rejudge_rejected"
 
         second_segments = self._normalize_segments(second_judge, regenerated)
+        second_segments = self._try_restore_trailing_placeholders(original_text, second_segments)
         if self._validate_preserved_content(original_text, second_segments):
-            return second_segments
+            return second_segments, total_model_elapsed, "rejudge_accept"
 
-        return first_pass_fallback or [original_text]
+        return first_pass_fallback or [original_text], total_model_elapsed, "rejudge_reverted"
 
-    def _log_polished_output(self, segments_text: List[str]):
+    def _log_polished_output(self, segments_text: List[str], process_elapsed: Optional[float] = None, mode: str = ""):
         if not segments_text:
             return
         final_text = "\n".join([s for s in segments_text if s]).strip()
         if not final_text:
             return
-        self._info(f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}")
+        if process_elapsed is None:
+            self._info(f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}")
+        else:
+            extra = f"，处理模式 {mode}" if mode else ""
+            self._info(
+                f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}，模型处理耗时 {process_elapsed:.2f}s{extra}"
+            )
         self._debug(f"清洗后输出={final_text[:3000]}")
 
     @filter.on_decorating_result(priority=-100000000000000000)
@@ -787,7 +1229,8 @@ class ReplyPolisherPlugin(Star):
 
         try:
             async with self._session_guard(event):
-                segments_text = await self._process_reply(event, plain_text)
+                segments_text, process_elapsed, process_mode = await self._process_reply(event, plain_text)
+
                 if not segments_text:
                     if bool(self._cfg("fallback_to_original_on_error", True)):
                         return
@@ -797,7 +1240,7 @@ class ReplyPolisherPlugin(Star):
                     joined = "\n".join(seg for seg in segments_text if seg).strip() or plain_text
                     segments_text = [joined]
 
-                self._log_polished_output(segments_text)
+                self._log_polished_output(segments_text, process_elapsed, process_mode)
 
                 segments = self._build_segment_chains(event, segments_text, original_reply, placeholder_map)
                 if not segments:
