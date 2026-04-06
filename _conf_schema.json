@@ -1,0 +1,160 @@
+{
+  "enable_group_process": {
+    "description": "处理群聊",
+    "hint": "关闭后仅处理私聊。",
+    "type": "bool",
+    "default": true
+  },
+  "enable_reply": {
+    "description": "保留引用",
+    "hint": "第一段是否保留对用户原消息的回复引用。",
+    "type": "bool",
+    "default": true
+  },
+  "polisher_provider_id": {
+    "description": "独立模型",
+    "hint": "本插件专用独立 provider，用于审查、清洗、分段与复审。",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "enable_segment": {
+    "description": "分段",
+    "hint": "是否启用分段。关闭后仅输出单段 clean_text。",
+    "type": "bool",
+    "default": true
+  },
+  "segment_preference": {
+    "description": "分段偏好",
+    "hint": "off：不限制风格。balanced：尽量均衡。humanized：更像真人聊天。",
+    "type": "string",
+    "options": [
+      "off",
+      "balanced",
+      "humanized"
+    ],
+    "default": "humanized"
+  },
+  "enable_segment_count_range": {
+    "description": "限制段数",
+    "hint": "开启后使用最小/最大段数。超出上限时会合并尾段，不会截断内容。",
+    "type": "bool",
+    "default": false
+  },
+  "min_segments": {
+    "description": "最小段数",
+    "hint": "开启限制段数后生效。",
+    "type": "int",
+    "default": 1
+  },
+  "max_segments": {
+    "description": "最大段数",
+    "hint": "开启限制段数后生效。",
+    "type": "int",
+    "default": 5
+  },
+  "segment_delay_mode": {
+    "description": "分段延迟模式",
+    "hint": "fixed：固定延迟。linear：按字数线性延迟。",
+    "type": "string",
+    "options": [
+      "fixed",
+      "linear"
+    ],
+    "default": "fixed"
+  },
+  "segment_fixed_delay": {
+    "description": "固定延迟秒数",
+    "hint": "fixed 模式下，每一段主动发送后的间隔秒数。",
+    "type": "float",
+    "default": 0.8
+  },
+  "segment_delay_per_char": {
+    "description": "每字延迟秒数",
+    "hint": "linear 模式下，每个字符增加的延迟秒数。",
+    "type": "float",
+    "default": 0.08
+  },
+  "segment_delay_max": {
+    "description": "最大延迟秒数",
+    "hint": "无论固定还是线性模式，单段等待时间都不会超过这个值。",
+    "type": "float",
+    "default": 5.0
+  },
+  "enable_clean": {
+    "description": "清洗",
+    "hint": "是否启用清洗。",
+    "type": "bool",
+    "default": false
+  },
+  "clean_prompt_template": {
+    "description": "清洗提示词",
+    "hint": "填写清洗规则。",
+    "type": "text",
+    "default": "# 清洗要求\n- 清洗异体字\n- 清洗繁体字\n- 清洗非术语英文\n- 清洗空行：只允许换行，不允许空白行或连续空行\n- 补全明显缺失的标点符号，使语句更自然\n- 只允许做格式、符号、空行、错别字、异体字、繁简体、非术语英文等层面的修正\n- 不得新增、删除、改写事实信息\n- 不得改变原意",
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark"
+  },
+  "enable_review": {
+    "description": "判别与打回",
+    "hint": "是否启用判别与打回。",
+    "type": "bool",
+    "default": false
+  },
+  "persona_style_rules": {
+    "description": "判别提示词",
+    "hint": "填写判别规则。",
+    "type": "text",
+    "default": "# 额外事项\n- 禁止出现括号\n- 禁止出现 * 号\n- 禁止出现颜文字\n- 禁止出现 Markdown 格式",
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark"
+  },
+  "judge_prompt_template": {
+    "description": "最终提示词",
+    "hint": "支持占位符：{{judge_rule_block}} {{clean_rule_block}} {{segment_rule_block}} {{retry_rule_block}} {{placeholder_rule_block}} {{output_format_block}} {{user_message}} {{reply_text}}",
+    "type": "text",
+    "default": "# 角色\n你是聊天回复后处理器，只负责在不改变原意的前提下，对候选回复进行必要处理。\n\n# 已知上下文\n- 用户消息：{{user_message}}\n- 候选回复：{{reply_text}}\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n{{retry_rule_block}}\n{{placeholder_rule_block}}\n\n## 输出格式\n{{output_format_block}}\n\n## 严格禁止\n- 不得歪曲原意\n- 不得偷换含义\n- 不得弱化、强化、扭曲原文情绪与立场\n- 不得补写原文没有的事实、设定、关系、动机、经历\n- 不得为了清洗、判别或分段而删除关键信息\n- 不得为了人设合规而把原文改成另一种意思\n- 不得新增原文不存在的人称、关系、设定、时间、地点、金额、数字、结论、承诺、经历\n- 不得删除或改写原文中的数字、URL、代码、引用片段、专有名词、时间信息\n- 未启用的功能，不得自行执行对应处理\n- 如果无法在当前已启用功能范围内安全处理，必须保守输出；仅在已启用判别与打回时，才允许返回 `reject_and_retry`\n- 不要输出 JSON 以外内容",
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark"
+  },
+  "retry_prompt_template": {
+    "description": "打回提示词",
+    "hint": "支持占位符：{{retry_judge_block}} {{retry_clean_block}} {{retry_segment_block}} {{placeholder_rule_block}} {{user_message}} {{reply_text}} {{reject_reason}}",
+    "type": "text",
+    "default": "# 任务\n你正在继续一段聊天。上一版候选回复由于不适合直接发送，被系统打回重写。\n\n# 要求\n1. 重新生成一版可以直接发给用户的最终回复。\n2. 不要提到系统、报错、重试、模型、超时、工具调用、审查等幕后信息。\n3. 只根据当前已启用的要求生成，不要自行添加额外格式要求。\n4. 只输出最终回复正文，不要解释。\n5. 不得改变原意，不得新增原文不存在的事实、设定、关系、时间、地点、金额、数字、经历。\n6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。\n7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。\n\n{{retry_judge_block}}\n{{retry_clean_block}}\n{{retry_segment_block}}\n{{placeholder_rule_block}}\n\n# 上下文\n- 用户刚刚的话：{{user_message}}\n- 上一版候选回复：{{reply_text}}\n- 打回原因：{{reject_reason}}",
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark"
+  },
+  "enable_retry_notice": {
+    "description": "启用过渡语",
+    "hint": "打回重生成前先发送一条过渡语。",
+    "type": "bool",
+    "default": false
+  },
+  "retry_notice_pool": {
+    "description": "过渡语池",
+    "hint": "随机发送其中一句。",
+    "type": "list",
+    "default": [
+      "等我一下",
+      "刚刚那句不太对 我重说",
+      "唔 我整理一下再说"
+    ]
+  },
+  "fallback_to_original_on_error": {
+    "description": "异常回退",
+    "hint": "插件内部异常时，是否回退原始回复。",
+    "type": "bool",
+    "default": true
+  },
+  "debug_log": {
+    "description": "调试日志",
+    "hint": "输出更多调试日志。",
+    "type": "bool",
+    "default": false
+  }
+}
