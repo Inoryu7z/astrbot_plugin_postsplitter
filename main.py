@@ -77,7 +77,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.2.4",
+    "1.2.5",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -86,7 +86,7 @@ class PostSplitterPlugin(Star):
     MENTION_PATTERN = re.compile(r"(?<![\w@])@[A-Za-z0-9_\-\u4e00-\u9fff]+")
     PLACEHOLDER_PATTERN = re.compile(r"\[\[RP_COMP_\d+\]\]")
     TRAILING_PLACEHOLDERS_PATTERN = re.compile(r"(?P<trailing>(?:\[\[RP_COMP_\d+\]\])+)+\s*$")
-    LOCAL_SPLIT_PATTERN = re.compile(r"([。！？?!；;\n]+)")
+    LOCAL_SPLIT_PATTERN = re.compile(r"([。！？?!\n]+)")
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -336,9 +336,106 @@ class PostSplitterPlugin(Star):
         source = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
         if not source.strip():
             return []
-        if "\n\n" in source:
-            return [seg.strip() for seg in source.split("\n\n") if seg.strip()]
-        return [source.strip()]
+        return self._local_split_text_core(source, apply_limits=False) or [source.strip()]
+
+    def _visible_len(self, text: str) -> int:
+        return len(self._strip_placeholders(str(text or "")).strip())
+
+    def _rebalance_segments_to_target(self, segments: List[str], target_count: int) -> List[str]:
+        normalized = [str(seg).strip() for seg in segments if str(seg).strip()]
+        if not normalized:
+            return []
+        if target_count <= 0 or len(normalized) <= target_count:
+            return normalized
+        if target_count == 1:
+            merged = "\n\n".join(normalized).strip()
+            return [merged] if merged else []
+
+        weights = [max(self._visible_len(seg), 1) for seg in normalized]
+        total_weight = sum(weights)
+        ideal_weight = max(total_weight / target_count, 1)
+
+        result: List[str] = []
+        current_parts: List[str] = []
+        current_weight = 0
+        remaining_weight = total_weight
+
+        for idx, seg in enumerate(normalized):
+            seg_weight = weights[idx]
+            current_parts.append(seg)
+            current_weight += seg_weight
+            remaining_weight -= seg_weight
+
+            remaining_items = len(normalized) - idx - 1
+            remaining_targets = target_count - len(result) - 1
+            if remaining_targets <= 0:
+                continue
+            if remaining_items < remaining_targets:
+                continue
+
+            threshold = ideal_weight * 0.85
+            average_remaining = remaining_weight / remaining_targets if remaining_targets > 0 else 0
+            current_text = "\n\n".join(current_parts).strip()
+            should_flush = False
+
+            if current_weight >= threshold:
+                should_flush = True
+            elif current_weight > 0 and average_remaining > ideal_weight * 1.25:
+                should_flush = True
+            elif current_weight > ideal_weight * 1.35:
+                should_flush = True
+
+            if should_flush:
+                result.append(current_text)
+                current_parts = []
+                current_weight = 0
+
+        tail_parts = current_parts[:]
+        for seg in normalized[len(result) + sum(0 for _ in []) :]:
+            pass
+
+        if tail_parts:
+            result.append("\n\n".join(tail_parts).strip())
+
+        if len(result) < target_count:
+            flat = [str(seg).strip() for seg in result if str(seg).strip()]
+            if not flat:
+                return []
+            while len(flat) < target_count and len(flat) >= 1:
+                break
+            return flat
+
+        if len(result) > target_count:
+            merged: List[str] = []
+            current_parts = []
+            current_weight = 0
+            result_weights = [max(self._visible_len(seg), 1) for seg in result]
+            total_weight = sum(result_weights)
+            ideal_weight = max(total_weight / target_count, 1)
+            for idx, seg in enumerate(result):
+                current_parts.append(seg)
+                current_weight += result_weights[idx]
+                remaining_items = len(result) - idx - 1
+                remaining_targets = target_count - len(merged) - 1
+                if remaining_targets <= 0:
+                    continue
+                if remaining_items < remaining_targets:
+                    continue
+                if current_weight >= ideal_weight * 0.9:
+                    merged.append("\n\n".join(current_parts).strip())
+                    current_parts = []
+                    current_weight = 0
+            if current_parts:
+                merged.append("\n\n".join(current_parts).strip())
+            result = merged
+
+        if len(result) > target_count:
+            head = result[: target_count - 1]
+            tail = result[target_count - 1 :]
+            merged_tail = "\n\n".join(seg for seg in tail if seg).strip()
+            result = head + ([merged_tail] if merged_tail else [])
+
+        return [seg for seg in result if seg]
 
     def _apply_segment_limits(self, segments: List[str], fallback_text: str) -> List[str]:
         normalized = [str(seg).strip() for seg in segments if str(seg).strip()]
@@ -354,20 +451,19 @@ class PostSplitterPlugin(Star):
                 max_seg = 1
             if min_seg > max_seg:
                 min_seg, max_seg = max_seg, min_seg
+
             if max_seg > 0 and len(normalized) > max_seg:
-                head = normalized[: max_seg - 1] if max_seg > 1 else []
-                tail = normalized[max_seg - 1 :]
-                merged_tail = "\n\n".join(seg for seg in tail if seg).strip()
-                normalized = head + ([merged_tail] if merged_tail else [])
+                normalized = self._rebalance_segments_to_target(normalized, max_seg)
+
             if len(normalized) < min_seg:
                 source = "\n\n".join(normalized).strip() or str(fallback_text or "").strip()
-                normalized = self._build_fallback_segments_from_text(source)
+                rebuilt = self._build_fallback_segments_from_text(source)
+                if len(rebuilt) > max_seg:
+                    rebuilt = self._rebalance_segments_to_target(rebuilt, max_seg)
+                normalized = rebuilt
         else:
             if len(normalized) > 12:
-                head = normalized[:11]
-                tail = normalized[11:]
-                merged_tail = "\n\n".join(seg for seg in tail if seg).strip()
-                normalized = head + ([merged_tail] if merged_tail else [])
+                normalized = self._rebalance_segments_to_target(normalized, 12)
 
         return normalized
 
@@ -457,15 +553,15 @@ class PostSplitterPlugin(Star):
                     if reinjected:
                         self._warn("segments 与 clean_text 存在占位符差异，已自动回填占位符并保留分段")
                         return self._apply_segment_limits(reinjected, clean_text or fallback_text)
-                    self._warn("segments 与 clean_text 存在可见差异，已优先信任 clean_text 并回退为本地单段")
-                    return self._build_fallback_segments_from_text(clean_text)
+                    self._warn("segments 与 clean_text 存在可见差异，已优先信任 clean_text 并回退为本地分段")
+                    return self._local_process_segments(clean_text)
             return self._apply_segment_limits(normalized, clean_text or fallback_text)
 
         if clean_text:
-            return self._build_fallback_segments_from_text(clean_text)
+            return self._local_process_segments(clean_text)
 
         fallback_text = str(fallback_text or "").strip()
-        return [fallback_text] if fallback_text else []
+        return self._local_process_segments(fallback_text)
 
     def _normalize_url_token(self, token: str) -> str:
         return (token or "").strip().rstrip("'\"）)]}，。！？；：,.!?;:")
@@ -739,35 +835,6 @@ class PostSplitterPlugin(Star):
             tokens.append(source[last:])
         return [token for token in tokens if token]
 
-    def _split_large_local_segment(self, text: str, target_length: int) -> List[str]:
-        source = str(text or "").strip()
-        if not source:
-            return []
-        if target_length <= 0 or len(self._strip_placeholders(source)) <= max(target_length * 2, 48):
-            return [source]
-
-        pieces = re.split(r"([，,、：:；;])", source)
-        if len(pieces) <= 1:
-            return [source]
-
-        segments: List[str] = []
-        current = ""
-        for piece in pieces:
-            if not piece:
-                continue
-            candidate = f"{current}{piece}"
-            visible_len = len(self._strip_placeholders(candidate).strip())
-            if current and visible_len >= target_length:
-                segments.append(current.strip())
-                current = piece
-            else:
-                current = candidate
-        if current.strip():
-            segments.append(current.strip())
-
-        normalized = [seg for seg in segments if seg]
-        return normalized or [source]
-
     def _merge_local_short_segments(self, segments: List[str], target_length: int) -> List[str]:
         normalized = [str(seg or "").strip() for seg in segments if str(seg or "").strip()]
         if not normalized:
@@ -776,20 +843,32 @@ class PostSplitterPlugin(Star):
         min_len = 6 if target_length <= 0 else max(6, min(12, target_length // 3))
         merged: List[str] = []
         for seg in normalized:
-            visible_len = len(self._strip_placeholders(seg).strip())
+            visible_len = self._visible_len(seg)
             if merged and visible_len < min_len:
-                connector = "" if re.match(r"^[。！？?!；;，,、：:]", seg) else "\n"
+                connector = "" if re.match(r"^[。！？?!]", seg) else "\n"
                 merged[-1] = f"{merged[-1]}{connector}{seg}".strip()
             else:
                 merged.append(seg)
 
-        if len(merged) >= 2 and len(self._strip_placeholders(merged[0]).strip()) < min_len:
+        if len(merged) >= 2 and self._visible_len(merged[0]) < min_len:
             merged[1] = f"{merged[0]}\n{merged[1]}".strip()
             merged = merged[1:]
 
+        if len(merged) >= 2 and self._visible_len(merged[-1]) < min_len:
+            merged[-2] = f"{merged[-2]}\n{merged[-1]}".strip()
+            merged = merged[:-1]
+
         return merged
 
-    def _local_split_text(self, text: str) -> List[str]:
+    def _local_should_split_on_sentence_punct(self, current_text: str, delimiter: str, target_length: int) -> bool:
+        visible_len = self._visible_len(current_text)
+        if visible_len <= 0:
+            return False
+        if target_length <= 0:
+            return visible_len >= 12
+        return visible_len >= max(8, target_length // 2)
+
+    def _local_split_text_core(self, text: str, apply_limits: bool) -> List[str]:
         source = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not source:
             return []
@@ -824,20 +903,6 @@ class PostSplitterPlugin(Star):
                 segments.append(seg)
             current = ""
 
-        def append_and_maybe_split(delimiter: str):
-            nonlocal current
-            current += delimiter
-            visible_len = len(self._strip_placeholders(current).strip())
-            if delimiter.count("\n") >= 2:
-                flush_current()
-                return
-            if re.fullmatch(r"[。！？?!；;]+", delimiter or ""):
-                if target_length <= 0 or visible_len >= max(8, target_length // 2):
-                    flush_current()
-                return
-            if "\n" in delimiter and visible_len >= max(12, target_length or 18):
-                flush_current()
-
         for token in tokens:
             if self._local_is_atomic_token(token):
                 current += token
@@ -846,7 +911,7 @@ class PostSplitterPlugin(Star):
             i = 0
             while i < len(token):
                 if token.startswith("\n\n", i) and not stack:
-                    append_and_maybe_split("\n\n")
+                    flush_current()
                     i += 2
                     while i < len(token) and token[i] == "\n":
                         i += 1
@@ -878,16 +943,18 @@ class PostSplitterPlugin(Star):
                     i += 1
                     continue
 
-                strong_match = re.match(r"[。！？?!；;]+", token[i:])
-                if strong_match:
-                    delimiter = strong_match.group(0)
-                    append_and_maybe_split(delimiter)
-                    i += len(delimiter)
+                if char == "\n":
+                    flush_current()
+                    i += 1
                     continue
 
-                if char == "\n":
-                    append_and_maybe_split("\n")
-                    i += 1
+                strong_match = re.match(r"[。！？?!]+", token[i:])
+                if strong_match:
+                    delimiter = strong_match.group(0)
+                    current += delimiter
+                    if self._local_should_split_on_sentence_punct(current, delimiter, target_length):
+                        flush_current()
+                    i += len(delimiter)
                     continue
 
                 current += char
@@ -896,15 +963,11 @@ class PostSplitterPlugin(Star):
         if current.strip():
             segments.append(current.strip())
 
-        if not segments:
-            segments = [source]
+        normalized = self._merge_local_short_segments(segments or [source], target_length)
+        return self._apply_segment_limits(normalized or [source], source) if apply_limits else (normalized or [source])
 
-        normalized: List[str] = []
-        for seg in segments:
-            normalized.extend(self._split_large_local_segment(seg, target_length))
-
-        normalized = self._merge_local_short_segments(normalized, target_length)
-        return self._apply_segment_limits(normalized or [source], source)
+    def _local_split_text(self, text: str) -> List[str]:
+        return self._local_split_text_core(text, apply_limits=True)
 
     def _local_process_segments(self, text: str) -> List[str]:
         if not self._segment_enabled():
@@ -1175,7 +1238,7 @@ class PostSplitterPlugin(Star):
             return first_pass_fallback or [original_text], total_model_elapsed, "rejudge_rejected"
 
         second_segments = self._normalize_segments(second_judge, regenerated)
-        second_segments = self._try_restore_trailing_placeholders(original_text, second_segments)
+        second_segments = self._try_restore_trailing_placeholders(regenerated, second_segments)
         if self._validate_preserved_content(original_text, second_segments):
             return second_segments, total_model_elapsed, "rejudge_accept"
 
