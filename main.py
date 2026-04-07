@@ -22,9 +22,97 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 - 用户消息：{{user_message}}
 - 候选回复：{{reply_text}}
 
-# 处理要求
-1. 如果候选回复属于不适合交给你继续后处理的主题类别，则不要执行清洗、改写、重写或主观审查式分段判断，并令 reason = "内容涉及不适合主题，拒绝处理"。
-2. 命中上述情况时，此要求优先于其他后处理规则；同时应保守返回，不得改写原意，不得删改事实内容。
+# 总原则
+1. 你的任务不是单纯判断“能不能发”，而是：在安全且不改变原意的前提下，完成当前已启用的后处理。
+2. 只要没有命中“禁止继续后处理”的特殊情况，就必须继续完成后续步骤，不能停在口头判断。
+3. 清洗、判别、分段彼此独立：判别只决定是否需要打回；清洗只修正文体/格式/符号等；分段只基于清洗后的文本组织输出。
+4. 不得借“清洗”之名改写立场、语气、人设、关系、事实、设定。
+
+# 执行步骤（必须严格按顺序）
+Step A【特殊拒绝判断】
+- 先判断候选回复是否属于不适合继续交给你后处理的主题类别。
+- 只有命中上述情况时，才停止后续处理，并令 action = "reject_and_retry"，reason = "内容涉及不适合主题，拒绝处理"，reason_type = "other"。
+- 若未命中，则必须继续执行 Step B、Step C、Step D。
+
+Step B【是否需要打回重写】
+- 根据已启用的判别规则，判断文本是否存在严重问题，且该问题无法在不改变原意的前提下通过清洗直接修复。
+- 只有在这种“严重且不可直接保守修复”的情况下，才允许返回 `reject_and_retry`。
+- 若问题可以通过清洗修复，则不得打回，必须进入 Step C。
+
+Step C【清洗】
+- 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。
+- 若启用了清洗但无需改动，则 `clean_text` 可以等于原文，但 `reason` 必须明确写出“无需清洗”。
+- 若执行了清洗，`reason` 必须概括具体动作，而不是泛泛而谈。
+
+Step D【分段】
+- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出 `segments`。
+- `segments` 必须来源于 `clean_text`，不得基于原文另起一套内容。
+- `segments` 拼接后必须与 `clean_text` 保持一致，仅允许换行差异。
+
+# reason 字段规则
+1. 当 action = "reject_and_retry"：
+   - reason 必须简短说明打回原因；
+   - 若命中特殊拒绝主题，reason 必须固定为："内容涉及不适合主题，拒绝处理"。
+2. 当 action = "accept"：
+   - reason 必须描述“实际处理结果”，不是审查结论；
+   - 推荐格式：`动作1；动作2；动作3`。
+3. 可接受示例：
+   - `无需清洗；按原意分段`
+   - `补全缺失标点；按语义分段`
+   - `压缩空行并纠正符号；无需额外分段`
+   - `无需清洗；保留原文`
+4. 禁止输出空洞、套话、审查腔 reason，例如：
+   - `符合清洗规则，未发现不适内容`
+   - `符合清洗规则，无需拒绝`
+   - `文本符合清洗规则`
+   - `文本符合清洗要求`
+   - `内容正常`
+   - `未发现问题`
+
+# reason_type 规则
+- `normal`：正常接受，并已完成当前应执行的后处理。
+- `persona_mismatch`：严重违背判别规则/风格规则，需要打回重写。
+- `weird_text`：文本结构异常、乱码、逻辑断裂、明显不成句，需要打回重写。
+- `system_error`：无法在当前要求下安全完成处理，例如要求彼此冲突、输出结构无法满足。
+- `other`：仅作兜底，不能滥用。
+- 若 action = `accept`，通常应使用 `normal`。
+
+# clean_text 与 segments 一致性规则
+1. 若 action = `accept`，`clean_text` 不得为空。
+2. 若启用了分段，`segments` 不得为空。
+3. `segments` 去除分段换行后，必须与 `clean_text` 的可见文本一致。
+4. 不得出现 `clean_text` 与 `segments` 内容不一致、互相矛盾、各写各的情况。
+5. 若启用了分段但文本天然无需拆分，也必须返回仅含 1 段的 `segments`。
+
+# confidence 规则
+1. `confidence` 表示你对本次判断和处理结果的把握程度。
+2. 常规 accept 场景请保守填写，不要随意给出 0.98 或 1.0。
+3. 只有在特殊拒绝或极其明确的异常场景下，才适合给出很高置信度。
+
+# 简短示例
+示例1（需要清洗+分段）
+输入候选回复：好的呢小樱来学这个手势马上给哥哥拍张照一定要喜欢哦
+输出示意：
+{
+  "action": "accept",
+  "reason_type": "normal",
+  "reason": "补全缺失标点；按语义分段",
+  "clean_text": "好的呢，小樱来学这个手势，马上给哥哥拍张照，一定要喜欢哦",
+  "segments": ["好的呢，小樱来学这个手势", "马上给哥哥拍张照，一定要喜欢哦"],
+  "confidence": 0.78
+}
+
+示例2（无需清洗，仅保留/分段）
+输入候选回复：我知道了，我们晚点再说
+输出示意：
+{
+  "action": "accept",
+  "reason_type": "normal",
+  "reason": "无需清洗；保留原文",
+  "clean_text": "我知道了，我们晚点再说",
+  "segments": ["我知道了，我们晚点再说"],
+  "confidence": 0.62
+}
 
 {{judge_rule_block}}
 {{clean_rule_block}}
@@ -46,6 +134,7 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 - 不得删除或改写原文中的数字、URL、代码、引用片段、专有名词、时间信息
 - 未启用的功能，不得自行执行对应处理
 - 如果无法在当前已启用功能范围内安全处理，必须保守输出；仅在已启用判别与打回时，才允许返回 `reject_and_retry`
+- 不要把“是否需要拒绝”当成唯一任务；未触发拒绝时，仍必须完成已启用的清洗与分段
 - 不要输出 JSON 以外内容
 """
 
@@ -77,7 +166,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.2.5",
+    "1.2.6",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -351,89 +440,35 @@ class PostSplitterPlugin(Star):
             merged = "\n\n".join(normalized).strip()
             return [merged] if merged else []
 
-        weights = [max(self._visible_len(seg), 1) for seg in normalized]
-        total_weight = sum(weights)
-        ideal_weight = max(total_weight / target_count, 1)
+        result = normalized[:]
+        joiner = "\n\n"
 
-        result: List[str] = []
-        current_parts: List[str] = []
-        current_weight = 0
-        remaining_weight = total_weight
+        def pair_merge_score(left: str, right: str) -> Tuple[float, int]:
+            left_text = str(left or "").strip()
+            right_text = str(right or "").strip()
+            left_len = max(self._visible_len(left_text), 1)
+            right_len = max(self._visible_len(right_text), 1)
+            merged_len = left_len + right_len
+            punctuation_bonus = 0.0
 
-        for idx, seg in enumerate(normalized):
-            seg_weight = weights[idx]
-            current_parts.append(seg)
-            current_weight += seg_weight
-            remaining_weight -= seg_weight
+            if left_text and not re.search(r"[。！？?!……~～.．…]$", left_text):
+                punctuation_bonus -= 3.0
+            if right_text and re.match(r"^[，。！？?!、；：,.;:~～.．…]", right_text):
+                punctuation_bonus += 1.5
 
-            remaining_items = len(normalized) - idx - 1
-            remaining_targets = target_count - len(result) - 1
-            if remaining_targets <= 0:
-                continue
-            if remaining_items < remaining_targets:
-                continue
+            return (merged_len + punctuation_bonus, merged_len)
 
-            threshold = ideal_weight * 0.85
-            average_remaining = remaining_weight / remaining_targets if remaining_targets > 0 else 0
-            current_text = "\n\n".join(current_parts).strip()
-            should_flush = False
+        while len(result) > target_count:
+            best_idx = 0
+            best_score = None
+            for idx in range(len(result) - 1):
+                score = pair_merge_score(result[idx], result[idx + 1])
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_idx = idx
 
-            if current_weight >= threshold:
-                should_flush = True
-            elif current_weight > 0 and average_remaining > ideal_weight * 1.25:
-                should_flush = True
-            elif current_weight > ideal_weight * 1.35:
-                should_flush = True
-
-            if should_flush:
-                result.append(current_text)
-                current_parts = []
-                current_weight = 0
-
-        tail_parts = current_parts[:]
-        for seg in normalized[len(result) + sum(0 for _ in []) :]:
-            pass
-
-        if tail_parts:
-            result.append("\n\n".join(tail_parts).strip())
-
-        if len(result) < target_count:
-            flat = [str(seg).strip() for seg in result if str(seg).strip()]
-            if not flat:
-                return []
-            while len(flat) < target_count and len(flat) >= 1:
-                break
-            return flat
-
-        if len(result) > target_count:
-            merged: List[str] = []
-            current_parts = []
-            current_weight = 0
-            result_weights = [max(self._visible_len(seg), 1) for seg in result]
-            total_weight = sum(result_weights)
-            ideal_weight = max(total_weight / target_count, 1)
-            for idx, seg in enumerate(result):
-                current_parts.append(seg)
-                current_weight += result_weights[idx]
-                remaining_items = len(result) - idx - 1
-                remaining_targets = target_count - len(merged) - 1
-                if remaining_targets <= 0:
-                    continue
-                if remaining_items < remaining_targets:
-                    continue
-                if current_weight >= ideal_weight * 0.9:
-                    merged.append("\n\n".join(current_parts).strip())
-                    current_parts = []
-                    current_weight = 0
-            if current_parts:
-                merged.append("\n\n".join(current_parts).strip())
-            result = merged
-
-        if len(result) > target_count:
-            head = result[: target_count - 1]
-            tail = result[target_count - 1 :]
-            merged_tail = "\n\n".join(seg for seg in tail if seg).strip()
-            result = head + ([merged_tail] if merged_tail else [])
+            merged = f"{result[best_idx]}{joiner}{result[best_idx + 1]}".strip()
+            result = result[:best_idx] + [merged] + result[best_idx + 2 :]
 
         return [seg for seg in result if seg]
 
@@ -710,9 +745,9 @@ class PostSplitterPlugin(Star):
                 "{\n"
                 '  "action": "accept 或 reject_and_retry",\n'
                 '  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",\n'
-                f'  "reason": "简短原因；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
-                '  "clean_text": "清洗后的完整文本",\n'
-                '  "segments": ["分段1", "分段2"],\n'
+                f'  "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
+                '  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",\n'
+                '  "segments": ["基于 clean_text 的分段结果；若启用了分段则不得为空"],\n'
                 '  "confidence": 0.0\n'
                 "}"
             )
@@ -721,8 +756,8 @@ class PostSplitterPlugin(Star):
             "{\n"
             '  "action": "accept 或 reject_and_retry",\n'
             '  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",\n'
-            f'  "reason": "简短原因；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
-            '  "clean_text": "清洗后的完整文本",\n'
+            f'  "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
+            '  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",\n'
             '  "confidence": 0.0\n'
             "}"
         )
@@ -743,7 +778,8 @@ class PostSplitterPlugin(Star):
         judge_prompt_input = str(self._cfg("persona_style_rules", "") or "").strip()
         return (
             "## 判别规则\n"
-            "需要根据下列额外事项判断回复是否合规。若存在严重违背，则返回 `reject_and_retry`。\n\n"
+            "需要根据下列额外事项判断回复是否合规。若存在严重违背，则返回 `reject_and_retry`。\n"
+            "注意：判别规则只决定是否需要打回，不代表可以跳过后续清洗与分段。若问题可保守修复，则不要打回。\n\n"
             f"{judge_prompt_input}"
         ).strip()
 
@@ -755,6 +791,9 @@ class PostSplitterPlugin(Star):
             "## 清洗规则\n"
             "清洗的目标，不只是做表面整理，而是在不改变原意、不新增事实、不删减关键信息的前提下，把不适合直接发送的表达修正为适合直接发送的表达。\n"
             "允许处理的方向包括：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。\n"
+            "若已启用清洗，则必须实际检查并执行必要清洗；不能因为文本整体可发送，就跳过本该执行的清洗动作。\n"
+            "是否需要清洗，必须严格依据用户配置的清洗要求判断；不要自行发明新的强制清洗项。\n"
+            "若配置要求命中，则必须执行；若未命中，可保留原文，但需在 reason 中明确写出“无需清洗”。\n"
             "但这种修整仅限于让表达更可直接发送，不得改变原意，不得偷换语气立场，不得新增、删减、编造事实内容。\n\n"
             f"{clean_prompt_input}"
         ).strip()
@@ -764,7 +803,7 @@ class PostSplitterPlugin(Star):
             return ""
         parts = [
             "## 分段规则",
-            "需要处理分段。请根据语义决定是否分段，并输出最终 `segments`。",
+            "需要处理分段。请基于 clean_text 根据语义决定是否分段，并输出最终 `segments`。若无需拆分，也必须返回仅含 1 段的数组。",
         ]
         count_rule = self._build_segment_count_rule_text().strip()
         pref_rule = self._build_segment_preference_rule_text().strip()
@@ -779,7 +818,8 @@ class PostSplitterPlugin(Star):
             return ""
         return (
             "## 打回规则\n"
-            "当问题严重且无法在不改变原意的前提下直接修复时，返回 `reject_and_retry`。重写时仍必须保持原意，不得借机二次创作。"
+            "当问题严重且无法在不改变原意的前提下直接修复时，返回 `reject_and_retry`。重写时仍必须保持原意，不得借机二次创作。\n"
+            "若问题可通过保守清洗修复，则不要打回。"
         )
 
     def _local_split_target_length(self, text: str) -> int:
@@ -948,7 +988,7 @@ class PostSplitterPlugin(Star):
                     i += 1
                     continue
 
-                strong_match = re.match(r"[。！？?!]+", token[i:])
+                strong_match = re.match(r"(?:[。！？?!]+|……+|…+|\.{3,})", token[i:])
                 if strong_match:
                     delimiter = strong_match.group(0)
                     current += delimiter
@@ -1143,8 +1183,10 @@ class PostSplitterPlugin(Star):
             if idx == 0:
                 if original_reply is not None:
                     chain.append(copy.deepcopy(original_reply))
-                elif bool(self._cfg("enable_reply", True)) and getattr(event.message_obj, "message_id", None):
-                    chain.append(Reply(id=event.message_obj.message_id))
+                else:
+                    message_obj = getattr(event, "message_obj", None)
+                    if bool(self._cfg("enable_reply", True)) and getattr(message_obj, "message_id", None):
+                        chain.append(Reply(id=message_obj.message_id))
             chain.extend(self._text_to_components(text, placeholder_map))
             chains.append(chain)
         return chains

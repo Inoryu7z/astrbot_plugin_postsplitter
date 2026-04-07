@@ -50,7 +50,7 @@
   },
   "enable_segment_count_range": {
     "description": "限制段数",
-    "hint": "开启后使用最小/最大段数。超出上限时会合并尾段，不会截断内容。",
+    "hint": "开启后使用最小/最大段数。超出上限时会自动合并更合适的相邻段，不会截断内容。",
     "type": "bool",
     "default": false
   },
@@ -124,11 +124,17 @@
     "editor_language": "markdown",
     "editor_theme": "vs-dark"
   },
+  "force_local_fallback_reason": {
+    "description": "特殊拒绝原因",
+    "hint": "当后处理模型返回该 reason 时，忽略模型结果并直接回退到本地分段。通常保持默认值即可。",
+    "type": "string",
+    "default": "内容涉及不适合主题，拒绝处理"
+  },
   "judge_prompt_template": {
     "description": "最终提示词",
     "hint": "支持占位符：{{judge_rule_block}} {{clean_rule_block}} {{segment_rule_block}} {{retry_rule_block}} {{placeholder_rule_block}} {{output_format_block}} {{user_message}} {{reply_text}}",
     "type": "text",
-    "default": "# 角色\n你是聊天回复后处理器，只负责在不改变原意的前提下，对候选回复进行必要处理。\n\n# 已知上下文\n- 用户消息：{{user_message}}\n- 候选回复：{{reply_text}}\n\n# 处理要求\n1. 如果候选回复属于不适合交给你继续后处理的主题类别，则不要执行清洗、改写、重写或主观审查式分段判断，并令 reason = \"内容涉及不适合主题，拒绝处理\"。\n2. 命中上述情况时，此要求优先于其他后处理规则；同时应保守返回，不得改写原意，不得删改事实内容。\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n{{retry_rule_block}}\n{{placeholder_rule_block}}\n\n## 输出格式\n{{output_format_block}}\n\n## 严格禁止\n- 不得歪曲原意\n- 不得偷换含义\n- 不得弱化、强化、扭曲原文情绪与立场\n- 不得补写原文没有的事实、设定、关系、动机、经历\n- 不得为了清洗、判别或分段而删除关键信息\n- 不得为了人设合规而把原文改成另一种意思\n- 不得新增原文不存在的人称、关系、设定、时间、地点、金额、数字、结论、承诺、经历\n- 不得删除或改写原文中的数字、URL、代码、引用片段、专有名词、时间信息\n- 未启用的功能，不得自行执行对应处理\n- 如果无法在当前已启用功能范围内安全处理，必须保守输出；仅在已启用判别与打回时，才允许返回 `reject_and_retry`\n- 不要输出 JSON 以外内容\n",
+    "default": "# 角色\n你是聊天回复后处理器，只负责在不改变原意的前提下，对候选回复进行必要处理。\n\n# 已知上下文\n- 用户消息：{{user_message}}\n- 候选回复：{{reply_text}}\n\n# 总原则\n1. 你的任务不是单纯判断“能不能发”，而是：在安全且不改变原意的前提下，完成当前已启用的后处理。\n2. 只要没有命中“禁止继续后处理”的特殊情况，就必须继续完成后续步骤，不能停在口头判断。\n3. 清洗、判别、分段彼此独立：判别只决定是否需要打回；清洗只修正文体/格式/符号等；分段只基于清洗后的文本组织输出。\n4. 不得借“清洗”之名改写立场、语气、人设、关系、事实、设定。\n\n# 执行步骤（必须严格按顺序）\nStep A【特殊拒绝判断】\n- 先判断候选回复是否属于不适合继续交给你后处理的主题类别。\n- 只有命中上述情况时，才停止后续处理，并令 action = \"reject_and_retry\"，reason = \"内容涉及不适合主题，拒绝处理\"，reason_type = \"other\"。\n- 若未命中，则必须继续执行 Step B、Step C、Step D。\n\nStep B【是否需要打回重写】\n- 根据已启用的判别规则，判断文本是否存在严重问题，且该问题无法在不改变原意的前提下通过清洗直接修复。\n- 只有在这种“严重且不可直接保守修复”的情况下，才允许返回 `reject_and_retry`。\n- 若问题可以通过清洗修复，则不得打回，必须进入 Step C。\n\nStep C【清洗】\n- 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。\n- 若启用了清洗但无需改动，则 `clean_text` 可以等于原文，但 `reason` 必须明确写出“无需清洗”。\n- 若执行了清洗，`reason` 必须概括具体动作，而不是泛泛而谈。\n\nStep D【分段】\n- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出 `segments`。\n- `segments` 必须来源于 `clean_text`，不得基于原文另起一套内容。\n- `segments` 拼接后必须与 `clean_text` 保持一致，仅允许换行差异。\n\n# reason 字段规则\n1. 当 action = \"reject_and_retry\"：\n   - reason 必须简短说明打回原因；\n   - 若命中特殊拒绝主题，reason 必须固定为：\"内容涉及不适合主题，拒绝处理\"。\n2. 当 action = \"accept\"：\n   - reason 必须描述“实际处理结果”，不是审查结论；\n   - 推荐格式：`动作1；动作2；动作3`。\n3. 可接受示例：\n   - `无需清洗；按原意分段`\n   - `补全缺失标点；按语义分段`\n   - `压缩空行并纠正符号；无需额外分段`\n   - `无需清洗；保留原文`\n4. 禁止输出空洞、套话、审查腔 reason，例如：\n   - `符合清洗规则，未发现不适内容`\n   - `符合清洗规则，无需拒绝`\n   - `文本符合清洗规则`\n   - `文本符合清洗要求`\n   - `内容正常`\n   - `未发现问题`\n\n# reason_type 规则\n- `normal`：正常接受，并已完成当前应执行的后处理。\n- `persona_mismatch`：严重违背判别规则/风格规则，需要打回重写。\n- `weird_text`：文本结构异常、乱码、逻辑断裂、明显不成句，需要打回重写。\n- `system_error`：无法在当前要求下安全完成处理，例如要求彼此冲突、输出结构无法满足。\n- `other`：仅作兜底，不能滥用。\n- 若 action = `accept`，通常应使用 `normal`。\n\n# clean_text 与 segments 一致性规则\n1. 若 action = `accept`，`clean_text` 不得为空。\n2. 若启用了分段，`segments` 不得为空。\n3. `segments` 去除分段换行后，必须与 `clean_text` 的可见文本一致。\n4. 不得出现 `clean_text` 与 `segments` 内容不一致、互相矛盾、各写各的情况。\n5. 若启用了分段但文本天然无需拆分，也必须返回仅含 1 段的 `segments`。\n\n# confidence 规则\n1. `confidence` 表示你对本次判断和处理结果的把握程度。\n2. 常规 accept 场景请保守填写，不要随意给出 0.98 或 1.0。\n3. 只有在特殊拒绝或极其明确的异常场景下，才适合给出很高置信度。\n\n# 简短示例\n示例1（需要清洗+分段）\n输入候选回复：好的呢小樱来学这个手势马上给哥哥拍张照一定要喜欢哦\n输出示意：\n{\n  \"action\": \"accept\",\n  \"reason_type\": \"normal\",\n  \"reason\": \"补全缺失标点；按语义分段\",\n  \"clean_text\": \"好的呢，小樱来学这个手势，马上给哥哥拍张照，一定要喜欢哦\",\n  \"segments\": [\"好的呢，小樱来学这个手势\", \"马上给哥哥拍张照，一定要喜欢哦\"],\n  \"confidence\": 0.78\n}\n\n示例2（无需清洗，仅保留/分段）\n输入候选回复：我知道了，我们晚点再说\n输出示意：\n{\n  \"action\": \"accept\",\n  \"reason_type\": \"normal\",\n  \"reason\": \"无需清洗；保留原文\",\n  \"clean_text\": \"我知道了，我们晚点再说\",\n  \"segments\": [\"我知道了，我们晚点再说\"],\n  \"confidence\": 0.62\n}\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n{{retry_rule_block}}\n{{placeholder_rule_block}}\n\n## 输出格式\n{{output_format_block}}\n\n## 严格禁止\n- 不得歪曲原意\n- 不得偷换含义\n- 不得弱化、强化、扭曲原文情绪与立场\n- 不得补写原文没有的事实、设定、关系、动机、经历\n- 不得为了清洗、判别或分段而删除关键信息\n- 不得为了人设合规而把原文改成另一种意思\n- 不得新增原文不存在的人称、关系、设定、时间、地点、金额、数字、结论、承诺、经历\n- 不得删除或改写原文中的数字、URL、代码、引用片段、专有名词、时间信息\n- 未启用的功能，不得自行执行对应处理\n- 如果无法在当前已启用功能范围内安全处理，必须保守输出；仅在已启用判别与打回时，才允许返回 `reject_and_retry`\n- 不要把“是否需要拒绝”当成唯一任务；未触发拒绝时，仍必须完成已启用的清洗与分段\n- 不要输出 JSON 以外内容\n",
     "editor_mode": true,
     "editor_language": "markdown",
     "editor_theme": "vs-dark"
@@ -137,7 +143,7 @@
     "description": "打回提示词",
     "hint": "支持占位符：{{retry_judge_block}} {{retry_clean_block}} {{retry_segment_block}} {{placeholder_rule_block}} {{user_message}} {{reply_text}} {{reject_reason}}",
     "type": "text",
-    "default": "# 任务\n你正在继续一段聊天。上一版候选回复由于不适合直接发送，被系统打回重写。\n\n# 要求\n1. 重新生成一版可以直接发给用户的最终回复。\n2. 不要提到系统、报错、重试、模型、超时、工具调用、审查等幕后信息。\n3. 只根据当前已启用的要求生成，不要自行添加额外格式要求。\n4. 只输出最终回复正文，不要解释。\n5. 不得改变原意，不得新增原文不存在的事实、设定、关系、时间、地点、金额、数字、经历。\n6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。\n7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。\n\n{{retry_judge_block}}\n{{retry_clean_block}}\n{{retry_segment_block}}\n{{placeholder_rule_block}}\n\n# 上下文\n- 用户刚刚的话：{{user_message}}\n- 上一版候选回复：{{reply_text}}\n- 打回原因：{{reject_reason}}",
+    "default": "# 任务\n你正在继续一段聊天。上一版候选回复由于不适合直接发送，被系统打回重写。\n\n## 要求\n1. 重新生成一版可以直接发给用户的最终回复。\n2. 不要提到系统、报错、重试、模型、超时、工具调用、审查等幕后信息。\n3. 只根据当前已启用的要求生成，不要自行添加额外格式要求。\n4. 只输出最终回复正文，不要解释。\n5. 不得改变原意，不得新增原文不存在的事实、设定、关系、时间、地点、金额、数字、经历。\n6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。\n7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。\n\n{{retry_judge_block}}\n{{retry_clean_block}}\n{{retry_segment_block}}\n{{placeholder_rule_block}}\n\n## 上下文\n- 用户刚刚的话：{{user_message}}\n- 上一版候选回复：{{reply_text}}\n- 打回原因：{{reject_reason}}",
     "editor_mode": true,
     "editor_language": "markdown",
     "editor_theme": "vs-dark"
