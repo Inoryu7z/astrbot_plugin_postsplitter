@@ -16,126 +16,46 @@ from astrbot.api.star import Context, Star, register
 DEFAULT_FORCE_LOCAL_REASON = "内容涉及不适合主题，拒绝处理"
 
 DEFAULT_JUDGE_PROMPT = """# 角色
-你是聊天回复后处理器，只负责在不改变原意的前提下，对候选回复进行必要处理。
+你是聊天回复后处理器，负责对候选回复做清洗与分段。
 
 # 已知上下文
 - 用户消息：{{user_message}}
 - 候选回复：{{reply_text}}
 
-# 总原则
-1. 你的任务不是单纯判断“能不能发”，而是：在安全且不改变原意的前提下，完成当前已启用的后处理。
-2. 只要没有命中“禁止继续后处理”的特殊情况，就必须继续完成后续步骤，不能停在口头判断。
-3. 清洗、判别、分段彼此独立：判别只决定是否需要打回；清洗只修正文体/格式/符号等；分段只基于清洗后的文本组织输出。
-4. 不得借“清洗”之名改写立场、语气、人设、关系、事实、设定。
+# 处理要求
+{{step_a_block}}
+{{step_b_block}}
+{{step_c_block}}
+{{step_d_block}}
 
-# 执行步骤（必须严格按顺序）
-Step A【特殊拒绝判断】
-- 先判断候选回复是否属于不适合继续交给你后处理的主题类别。
-- 只有命中上述情况时，才停止后续处理，并令 action = "reject_and_retry"，reason = "内容涉及不适合主题，拒绝处理"，reason_type = "other"。
-- 若未命中，则必须继续执行 Step B、Step C、Step D。
-
-Step B【是否需要打回重写】
-- 根据已启用的判别规则，判断文本是否存在严重问题，且该问题无法在不改变原意的前提下通过清洗直接修复。
-- 只有在这种“严重且不可直接保守修复”的情况下，才允许返回 `reject_and_retry`。
-- 若问题可以通过清洗修复，则不得打回，必须进入 Step C。
-
-Step C【清洗】
-- 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。
-- 若启用了清洗但无需改动，则 `clean_text` 可以等于原文，但 `reason` 必须明确写出“无需清洗”。
-- 若执行了清洗，`reason` 必须概括具体动作，而不是泛泛而谈。
-
-Step D【分段】
-- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出 `segments`。
-- `segments` 必须来源于 `clean_text`，不得基于原文另起一套内容。
-- `segments` 拼接后必须与 `clean_text` 保持一致，仅允许换行差异。
-
-# reason 字段规则
-1. 当 action = "reject_and_retry"：
-   - reason 必须简短说明打回原因；
-   - 若命中特殊拒绝主题，reason 必须固定为："内容涉及不适合主题，拒绝处理"。
-2. 当 action = "accept"：
-   - reason 必须描述“实际处理结果”，不是审查结论；
-   - 推荐格式：`动作1；动作2；动作3`。
-3. 可接受示例：
-   - `无需清洗；按原意分段`
-   - `补全缺失标点；按语义分段`
-   - `压缩空行并纠正符号；无需额外分段`
-   - `无需清洗；保留原文`
-4. 禁止输出空洞、套话、审查腔 reason，例如：
-   - `符合清洗规则，未发现不适内容`
-   - `符合清洗规则，无需拒绝`
-   - `文本符合清洗规则`
-   - `文本符合清洗要求`
-   - `内容正常`
-   - `未发现问题`
-
-# reason_type 规则
-- `normal`：正常接受，并已完成当前应执行的后处理。
-- `persona_mismatch`：严重违背判别规则/风格规则，需要打回重写。
-- `weird_text`：文本结构异常、乱码、逻辑断裂、明显不成句，需要打回重写。
-- `system_error`：无法在当前要求下安全完成处理，例如要求彼此冲突、输出结构无法满足。
-- `other`：仅作兜底，不能滥用。
-- 若 action = `accept`，通常应使用 `normal`。
-
-# clean_text 与 segments 一致性规则
-1. 若 action = `accept`，`clean_text` 不得为空。
-2. 若启用了分段，`segments` 不得为空。
-3. `segments` 去除分段换行后，必须与 `clean_text` 的可见文本一致。
-4. 不得出现 `clean_text` 与 `segments` 内容不一致、互相矛盾、各写各的情况。
-5. 若启用了分段但文本天然无需拆分，也必须返回仅含 1 段的 `segments`。
-
-# confidence 规则
-1. `confidence` 表示你对本次判断和处理结果的把握程度。
-2. 常规 accept 场景请保守填写，不要随意给出 0.98 或 1.0。
-3. 只有在特殊拒绝或极其明确的异常场景下，才适合给出很高置信度。
-
-# 简短示例
-示例1（需要清洗+分段）
-输入候选回复：好的呢小樱来学这个手势马上给哥哥拍张照一定要喜欢哦
-输出示意：
+# 输出要求
+只返回 JSON，不要输出解释或前后缀：
 {
-  "action": "accept",
-  "reason_type": "normal",
-  "reason": "补全缺失标点；按语义分段",
-  "clean_text": "好的呢，小樱来学这个手势，马上给哥哥拍张照，一定要喜欢哦",
-  "segments": ["好的呢，小樱来学这个手势", "马上给哥哥拍张照，一定要喜欢哦"],
-  "confidence": 0.78
-}
-
-示例2（无需清洗，仅保留/分段）
-输入候选回复：我知道了，我们晚点再说
-输出示意：
-{
-  "action": "accept",
-  "reason_type": "normal",
-  "reason": "无需清洗；保留原文",
-  "clean_text": "我知道了，我们晚点再说",
-  "segments": ["我知道了，我们晚点再说"],
-  "confidence": 0.62
+  "action": "accept 或 reject_and_retry",
+  "reason": "实际做了什么处理，不要写审查结论",
+  "clean_text": "清洗后的完整文本",
+  "segments": ["分段结果"]
 }
 
 {{judge_rule_block}}
 {{clean_rule_block}}
 {{segment_rule_block}}
-{{retry_rule_block}}
-{{placeholder_rule_block}}
 
-## 输出格式
-{{output_format_block}}
+# 示例
+示例1
+原文：好的主人我immediately就来拍张照片一定要喜欢喵
+清洗后：好的主人，我马上就来拍张照片，一定要喜欢喵
+分段后：["好的主人，我马上就来拍张照片", "一定要喜欢喵"]
 
-## 严格禁止
-- 不得歪曲原意
-- 不得偷换含义
-- 不得弱化、强化、扭曲原文情绪与立场
-- 不得补写原文没有的事实、设定、关系、动机、经历
-- 不得为了清洗、判别或分段而删除关键信息
-- 不得为了人设合规而把原文改成另一种意思
-- 不得新增原文不存在的人称、关系、设定、时间、地点、金额、数字、结论、承诺、经历
-- 不得删除或改写原文中的数字、URL、代码、引用片段、专有名词、时间信息
-- 未启用的功能，不得自行执行对应处理
-- 如果无法在当前已启用功能范围内安全处理，必须保守输出；仅在已启用判别与打回时，才允许返回 `reject_and_retry`
-- 不要把“是否需要拒绝”当成唯一任务；未触发拒绝时，仍必须完成已启用的清洗与分段
-- 不要输出 JSON 以外内容
+示例2
+原文：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整👀。
+清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整
+分段后：["草，试了好几个路径都发不出去。。。", "这个环境的文件发送可能有点问题捏。", "你等下，我看看有没啥其他办法整"]
+
+# 严格禁止
+- 不得删除原文中的任何内容，包括文字、符号、占位符
+- 不得遗漏原文中的任何段落或句子
+- 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中
 """
 
 DEFAULT_RETRY_PROMPT = """# 任务
@@ -166,7 +86,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.2.6",
+    "1.3.1",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -822,6 +742,50 @@ class PostSplitterPlugin(Star):
             "若问题可通过保守清洗修复，则不要打回。"
         )
 
+    def _compose_step_a_block(self) -> str:
+        """Step A: 特殊拒绝判断，永远开启"""
+        return (
+            "## Step A：特殊拒绝判断\n"
+            "- 先判断候选回复是否属于不适合继续交给你后处理的主题类别。\n"
+            "- 只有命中上述情况时，才停止后续处理，并令 action = \"reject_and_retry\"。\n"
+            "- 若未命中，则必须继续执行后续步骤。"
+        )
+
+    def _compose_step_b_block(self) -> str:
+        """Step B: 是否需要打回重写，仅当开启 review 时传入"""
+        if not self._review_enabled():
+            return ""
+        return (
+            "## Step B：是否需要打回重写\n"
+            "- 根据已启用的判别规则，判断文本是否存在严重问题，且该问题无法在不改变原意的前提下通过清洗直接修复。\n"
+            "- 只有在这种“严重且不可直接保守修复”的情况下，才允许返回 `reject_and_retry`。\n"
+            "- 若问题可以通过清洗修复，则不得打回，必须继续处理。"
+        )
+
+    def _compose_step_c_block(self) -> str:
+        """Step C: 清洗，仅当开启 clean 时传入"""
+        if not self._clean_enabled():
+            return ""
+        return (
+            "## Step C：清洗\n"
+            "- 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。\n"
+            "- 清洗时不得删除原文中的任何内容，不得遗漏任何段落或句子。\n"
+            "- 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中。"
+        )
+
+    def _compose_step_d_block(self) -> str:
+        """Step D: 分段，仅当开启 segment 时传入"""
+        if not self._segment_enabled():
+            return ""
+        count_rule = self._build_segment_count_rule_text().strip()
+        count_text = f" {count_rule}" if count_rule else ""
+        return (
+            "## Step D：分段\n"
+            f"- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出最终 `segments`。{count_text}\n"
+            "- `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。\n"
+            "- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。"
+        )
+
     def _local_split_target_length(self, text: str) -> int:
         source = str(text or "")
         visible = self._strip_placeholders(source)
@@ -1031,6 +995,10 @@ class PostSplitterPlugin(Star):
         values = {
             "reply_text": reply_text,
             "user_message": getattr(event, "message_str", "") or "",
+            "step_a_block": self._compose_step_a_block(),
+            "step_b_block": self._compose_step_b_block(),
+            "step_c_block": self._compose_step_c_block(),
+            "step_d_block": self._compose_step_d_block(),
             "judge_rule_block": self._compose_judge_rule_block(),
             "clean_rule_block": self._compose_clean_rule_block(),
             "segment_rule_block": self._compose_segment_rule_block(),
@@ -1241,6 +1209,18 @@ class PostSplitterPlugin(Star):
         action = str(judge_data.get("action") or "accept").strip().lower()
         reason = str(judge_data.get("reason") or "").strip()
         self._debug(f"初审 action={action}, reason={reason}")
+
+        # 检查清洗后是否丢失占位符，如果丢失则补回
+        clean_text = str(judge_data.get("clean_text") or "").strip()
+        original_placeholders = self.PLACEHOLDER_PATTERN.findall(original_text)
+        if original_placeholders:
+            cleaned_placeholders = self.PLACEHOLDER_PATTERN.findall(clean_text)
+            # 如果原文有占位符但清洗后丢失了，补回到 clean_text 末尾
+            if len(cleaned_placeholders) < len(original_placeholders):
+                missing = [p for p in original_placeholders if p not in cleaned_placeholders]
+                # 补回丢失的占位符到 clean_text 末尾
+                judge_data["clean_text"] = clean_text + "".join(missing)
+                self._warn(f"清洗后占位符丢失，已自动补回。丢失的占位符={missing}")
 
         first_pass_segments = self._normalize_segments(judge_data, original_text)
         first_pass_segments = self._try_restore_trailing_placeholders(original_text, first_pass_segments)
