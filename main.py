@@ -86,7 +86,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.3.1",
+    "1.3.2",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -153,6 +153,9 @@ class PostSplitterPlugin(Star):
 
     def _any_post_process_enabled(self) -> bool:
         return any([self._review_enabled(), self._clean_enabled(), self._segment_enabled()])
+
+    def _segments_consistency_check_enabled(self) -> bool:
+        return bool(self._cfg("enable_segments_consistency_check", False))
 
     def _preserve_mode(self) -> str:
         mode = str(self._cfg("preserve_mode", "basic") or "basic").strip().lower()
@@ -506,15 +509,19 @@ class PostSplitterPlugin(Star):
                 if self._normalized_compare_text_ignore_segment_breaks(joined_segments) != self._normalized_compare_text_ignore_segment_breaks(clean_text):
                     reinjected = self._reinject_placeholders_into_segments(normalized, clean_text)
                     if reinjected:
-                        self._warn("segments 与 clean_text 存在占位符差异，已自动回填占位符并保留分段")
+                        if self._segments_consistency_check_enabled():
+                            self._warn("segments 与 clean_text 存在占位符差异，已自动回填占位符并保留分段")
                         return self._apply_segment_limits(reinjected, clean_text or fallback_text)
-                    self._warn("segments 与 clean_text 存在可见差异，已优先信任 clean_text 并回退为本地分段")
-                    return self._local_process_segments(clean_text)
+                    # 只有开启一致性检查时才回退到本地分段，否则信任模型分段
+                    if self._segments_consistency_check_enabled():
+                        self._warn("segments 与 clean_text 存在可见差异，已优先信任 clean_text 并回退为本地分段")
+                        return self._local_process_segments(clean_text)
+                    # 开关关闭时，信任模型分段结果，不触发回退
             return self._apply_segment_limits(normalized, clean_text or fallback_text)
 
+        # 当 normalized 为空时（模型没返回 segments），回退到本地分段
         if clean_text:
             return self._local_process_segments(clean_text)
-
         fallback_text = str(fallback_text or "").strip()
         return self._local_process_segments(fallback_text)
 
@@ -994,7 +1001,6 @@ class PostSplitterPlugin(Star):
 
         values = {
             "reply_text": reply_text,
-            "user_message": getattr(event, "message_str", "") or "",
             "step_a_block": self._compose_step_a_block(),
             "step_b_block": self._compose_step_b_block(),
             "step_c_block": self._compose_step_c_block(),
@@ -1266,12 +1272,14 @@ class PostSplitterPlugin(Star):
 
         return first_pass_fallback or [original_text], total_model_elapsed, "rejudge_reverted"
 
-    def _log_polished_output(self, segments_text: List[str], process_elapsed: Optional[float] = None, mode: str = ""):
+    def _log_polished_output(self, original_text: str, segments_text: List[str], process_elapsed: Optional[float] = None, mode: str = ""):
         if not segments_text:
             return
         final_text = "\n".join([s for s in segments_text if s]).strip()
         if not final_text:
             return
+        # 非调试模式下输出原文本和最终结果
+        self._info(f"原文本：{original_text}")
         if process_elapsed is None:
             self._info(f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}")
         else:
@@ -1279,6 +1287,7 @@ class PostSplitterPlugin(Star):
             self._info(
                 f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}，模型处理耗时 {process_elapsed:.2f}s{extra}"
             )
+        self._info(f"分段结果：{segments_text}")
         self._debug(f"清洗后输出={final_text[:3000]}")
 
     @filter.on_decorating_result(priority=-100000000000000000)
@@ -1325,7 +1334,7 @@ class PostSplitterPlugin(Star):
                     joined = "\n".join(seg for seg in segments_text if seg).strip() or plain_text
                     segments_text = [joined]
 
-                self._log_polished_output(segments_text, process_elapsed, process_mode)
+                self._log_polished_output(plain_text, segments_text, process_elapsed, process_mode)
 
                 segments = self._build_segment_chains(event, segments_text, original_reply, placeholder_map)
                 if not segments:
