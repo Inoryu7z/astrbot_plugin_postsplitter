@@ -1,3 +1,19 @@
+### v1.3.3
+
+**🧹 清除遗留：插件标识统一**
+* 移除所有 `ReplyPolisher` 旧标识，统一改为 `PostSplitter`。
+* 日志前缀：`[ReplyPolisher]` → `[PostSplitter]`
+* 事件标记：`__reply_polisher_is_llm_reply` → `__post_splitter_is_llm_reply`
+* 处理标记：`__reply_polisher_processed` → `__post_splitter_processed`
+
+**📝 优化：默认模板示例增强**
+* `DEFAULT_JUDGE_PROMPT` 示例新增场景说明：
+  - 示例1：标注补全标点仅适用于超长连续文本
+  - 示例2：明确省略号变式（三个句号）与分段末尾句号的区别处理
+* `_conf_schema.json` 默认模板同步更新，与代码保持一致。
+
+---
+
 ### v1.3.2
 
 **📝 优化：非调试模式下的日志输出完善**

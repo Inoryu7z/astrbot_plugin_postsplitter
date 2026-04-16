@@ -42,15 +42,15 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 {{segment_rule_block}}
 
 # 示例
-示例1
+示例1（补全标点时，只针对类似于本情况中的超长连续文本才选择补）
 原文：好的主人我immediately就来拍张照片一定要喜欢喵
 清洗后：好的主人，我马上就来拍张照片，一定要喜欢喵
 分段后：["好的主人，我马上就来拍张照片", "一定要喜欢喵"]
 
-示例2
+示例2（第一个分段的三个句号是省略号的变式，不可去除；但是第二个分段的句号需要在分段时去除）
 原文：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整👀。
 清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整
-分段后：["草，试了好几个路径都发不出去。。。", "这个环境的文件发送可能有点问题捏。", "你等下，我看看有没啥其他办法整"]
+分段后：["草，试了好几个路径都发不出去。。。", "这个环境的文件发送可能有点问题捏", "你等下，我看看有没啥其他办法整"]
 
 # 严格禁止
 - 不得删除原文中的任何内容，包括文字、符号、占位符
@@ -86,7 +86,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.3.2",
+    "1.3.3",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -105,7 +105,7 @@ class PostSplitterPlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        setattr(event, "__reply_polisher_is_llm_reply", True)
+        setattr(event, "__post_splitter_is_llm_reply", True)
 
     def _cfg(self, key: str, default=None):
         return self.config.get(key, default)
@@ -134,13 +134,13 @@ class PostSplitterPlugin(Star):
 
     def _debug(self, message: str):
         if self._cfg("debug_log", False):
-            logger.info(f"[ReplyPolisher] {message}")
+            logger.info(f"[PostSplitter] {message}")
 
     def _info(self, message: str):
-        logger.info(f"[ReplyPolisher] {message}")
+        logger.info(f"[PostSplitter] {message}")
 
     def _warn(self, message: str):
-        logger.warning(f"[ReplyPolisher] {message}")
+        logger.warning(f"[PostSplitter] {message}")
 
     def _review_enabled(self) -> bool:
         return bool(self._cfg("enable_review", False))
@@ -209,7 +209,7 @@ class PostSplitterPlugin(Star):
             try:
                 return bool(is_model_result())
             except Exception as e:
-                logger.debug(f"[ReplyPolisher] is_model_result() 判定失败，尝试回退: {e}")
+                logger.debug(f"[PostSplitter] is_model_result() 判定失败，尝试回退: {e}")
 
         is_llm_result = getattr(result, "is_llm_result", None)
         if callable(is_llm_result):
@@ -217,14 +217,14 @@ class PostSplitterPlugin(Star):
                 if is_llm_result():
                     return True
             except Exception as e:
-                logger.debug(f"[ReplyPolisher] is_llm_result() 判定失败，尝试回退: {e}")
+                logger.debug(f"[PostSplitter] is_llm_result() 判定失败，尝试回退: {e}")
 
         content_type = getattr(result, "result_content_type", None)
         if content_type is not None:
             type_name = getattr(content_type, "name", "")
             return type_name in {"LLM_RESULT", "AGENT_RUNNER_RESULT"}
 
-        return getattr(event, "__reply_polisher_is_llm_reply", False)
+        return getattr(event, "__post_splitter_is_llm_reply", False)
 
     @staticmethod
     def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -512,14 +512,11 @@ class PostSplitterPlugin(Star):
                         if self._segments_consistency_check_enabled():
                             self._warn("segments 与 clean_text 存在占位符差异，已自动回填占位符并保留分段")
                         return self._apply_segment_limits(reinjected, clean_text or fallback_text)
-                    # 只有开启一致性检查时才回退到本地分段，否则信任模型分段
                     if self._segments_consistency_check_enabled():
                         self._warn("segments 与 clean_text 存在可见差异，已优先信任 clean_text 并回退为本地分段")
                         return self._local_process_segments(clean_text)
-                    # 开关关闭时，信任模型分段结果，不触发回退
             return self._apply_segment_limits(normalized, clean_text or fallback_text)
 
-        # 当 normalized 为空时（模型没返回 segments），回退到本地分段
         if clean_text:
             return self._local_process_segments(clean_text)
         fallback_text = str(fallback_text or "").strip()
@@ -663,67 +660,62 @@ class PostSplitterPlugin(Star):
             return "不对分段风格做额外限制，请仅根据语义自然度判断是否分段以及如何分段。"
         if pref == "balanced":
             return "分段时，在不破坏语义和表达自然度的前提下，尽量让各段长度更均匀；若内容天然不适合均分，则以语义自然为第一优先。"
-        return "分段时，优先模拟真人在即时聊天中的发送习惯。允许把短促起手句、语气过渡句、临时停顿句单独成段，例如“我去”“等等”“不是”。相比段长均匀，更优先保留自然聊天节奏。"
+        return '分段时，优先模拟真人在即时聊天中的发送习惯。允许把短促起手句、语气过渡句、临时停顿句单独成段，例如"我去""等等""不是"。相比段长均匀，更优先保留自然聊天节奏。'
 
     def _compose_output_format_block(self) -> str:
+        forced_reason = self._forced_local_reason()
         if self._segment_enabled():
-            return (
-                "只能输出 JSON，不要输出解释、前后缀、Markdown：\n\n"
-                "{\n"
-                '  "action": "accept 或 reject_and_retry",\n'
-                '  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",\n'
-                f'  "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
-                '  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",\n'
-                '  "segments": ["基于 clean_text 的分段结果；若启用了分段则不得为空"],\n'
-                '  "confidence": 0.0\n'
-                "}"
-            )
-        return (
-            "只能输出 JSON，不要输出解释、前后缀、Markdown：\n\n"
-            "{\n"
-            '  "action": "accept 或 reject_and_retry",\n'
-            '  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",\n'
-            f'  "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {self._forced_local_reason()}",\n'
-            '  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",\n'
-            '  "confidence": 0.0\n'
-            "}"
-        )
+            return f'''只能输出 JSON，不要输出解释、前后缀、Markdown：
+
+{{
+  "action": "accept 或 reject_and_retry",
+  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",
+  "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {forced_reason}",
+  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",
+  "segments": ["基于 clean_text 的分段结果；若启用了分段则不得为空"],
+  "confidence": 0.0
+}}'''
+        return f'''只能输出 JSON，不要输出解释、前后缀、Markdown：
+
+{{
+  "action": "accept 或 reject_and_retry",
+  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",
+  "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {forced_reason}",
+  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",
+  "confidence": 0.0
+}}'''
 
     def _compose_placeholder_rule_block(self, reply_text: str) -> str:
         placeholders = self.PLACEHOLDER_PATTERN.findall(reply_text or "")
         if not placeholders:
             return ""
-        return (
-            "## 占位符保留规则\n"
-            "正文中可能包含形如 [[RP_COMP_数字]] 的组件占位符。它们代表原消息中的非文本内联组件。\n"
-            "这些占位符必须原样保留，不得删除、改写、翻译、拆开、合并、补空格或调整顺序。"
-        )
+        return """## 占位符保留规则
+正文中可能包含形如 [[RP_COMP_数字]] 的组件占位符。它们代表原消息中的非文本内联组件。
+这些占位符必须原样保留，不得删除、改写、翻译、拆开、合并、补空格或调整顺序。"""
 
     def _compose_judge_rule_block(self) -> str:
         if not self._review_enabled():
             return ""
         judge_prompt_input = str(self._cfg("persona_style_rules", "") or "").strip()
-        return (
-            "## 判别规则\n"
-            "需要根据下列额外事项判断回复是否合规。若存在严重违背，则返回 `reject_and_retry`。\n"
-            "注意：判别规则只决定是否需要打回，不代表可以跳过后续清洗与分段。若问题可保守修复，则不要打回。\n\n"
-            f"{judge_prompt_input}"
-        ).strip()
+        return f"""## 判别规则
+需要根据下列额外事项判断回复是否合规。若存在严重违背，则返回 `reject_and_retry`。
+注意：判别规则只决定是否需要打回，不代表可以跳过后续清洗与分段。若问题可保守修复，则不要打回。
+
+{judge_prompt_input}""".strip()
 
     def _compose_clean_rule_block(self) -> str:
         if not self._clean_enabled():
             return ""
         clean_prompt_input = str(self._cfg("clean_prompt_template", "") or "").strip()
-        return (
-            "## 清洗规则\n"
-            "清洗的目标，不只是做表面整理，而是在不改变原意、不新增事实、不删减关键信息的前提下，把不适合直接发送的表达修正为适合直接发送的表达。\n"
-            "允许处理的方向包括：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。\n"
-            "若已启用清洗，则必须实际检查并执行必要清洗；不能因为文本整体可发送，就跳过本该执行的清洗动作。\n"
-            "是否需要清洗，必须严格依据用户配置的清洗要求判断；不要自行发明新的强制清洗项。\n"
-            "若配置要求命中，则必须执行；若未命中，可保留原文，但需在 reason 中明确写出“无需清洗”。\n"
-            "但这种修整仅限于让表达更可直接发送，不得改变原意，不得偷换语气立场，不得新增、删减、编造事实内容。\n\n"
-            f"{clean_prompt_input}"
-        ).strip()
+        return f"""## 清洗规则
+清洗的目标，不只是做表面整理，而是在不改变原意、不新增事实、不删减关键信息的前提下，把不适合直接发送的表达修正为适合直接发送的表达。
+允许处理的方向包括：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。
+若已启用清洗，则必须实际检查并执行必要清洗；不能因为文本整体可发送，就跳过本该执行的清洗动作。
+是否需要清洗，必须严格依据用户配置的清洗要求判断；不要自行发明新的强制清洗项。
+若配置要求命中，则必须执行；若未命中，可保留原文，但需在 reason 中明确写出"无需清洗"。
+但这种修整仅限于让表达更可直接发送，不得改变原意，不得偷换语气立场，不得新增、删减、编造事实内容。
+
+{clean_prompt_input}""".strip()
 
     def _compose_segment_rule_block(self) -> str:
         if not self._segment_enabled():
@@ -743,42 +735,34 @@ class PostSplitterPlugin(Star):
     def _compose_retry_rule_block(self) -> str:
         if not self._review_enabled():
             return ""
-        return (
-            "## 打回规则\n"
-            "当问题严重且无法在不改变原意的前提下直接修复时，返回 `reject_and_retry`。重写时仍必须保持原意，不得借机二次创作。\n"
-            "若问题可通过保守清洗修复，则不要打回。"
-        )
+        return """## 打回规则
+当问题严重且无法在不改变原意的前提下直接修复时，返回 `reject_and_retry`。重写时仍必须保持原意，不得借机二次创作。
+若问题可通过保守清洗修复，则不要打回。"""
 
     def _compose_step_a_block(self) -> str:
         """Step A: 特殊拒绝判断，永远开启"""
-        return (
-            "## Step A：特殊拒绝判断\n"
-            "- 先判断候选回复是否属于不适合继续交给你后处理的主题类别。\n"
-            "- 只有命中上述情况时，才停止后续处理，并令 action = \"reject_and_retry\"。\n"
-            "- 若未命中，则必须继续执行后续步骤。"
-        )
+        return """## Step A：特殊拒绝判断
+- 先判断候选回复是否属于不适合继续交给你后处理的主题类别。
+- 只有命中上述情况时，才停止后续处理，并令 action = "reject_and_retry"。
+- 若未命中，则必须继续执行后续步骤。"""
 
     def _compose_step_b_block(self) -> str:
         """Step B: 是否需要打回重写，仅当开启 review 时传入"""
         if not self._review_enabled():
             return ""
-        return (
-            "## Step B：是否需要打回重写\n"
-            "- 根据已启用的判别规则，判断文本是否存在严重问题，且该问题无法在不改变原意的前提下通过清洗直接修复。\n"
-            "- 只有在这种“严重且不可直接保守修复”的情况下，才允许返回 `reject_and_retry`。\n"
-            "- 若问题可以通过清洗修复，则不得打回，必须继续处理。"
-        )
+        return """## Step B：是否需要打回重写
+- 根据已启用的判别规则，判断文本是否存在严重问题，且该问题无法在不改变原意的前提下通过清洗直接修复。
+- 只有在这种"严重且不可直接保守修复"的情况下，才允许返回 `reject_and_retry`。
+- 若问题可以通过清洗修复，则不得打回，必须继续处理。"""
 
     def _compose_step_c_block(self) -> str:
         """Step C: 清洗，仅当开启 clean 时传入"""
         if not self._clean_enabled():
             return ""
-        return (
-            "## Step C：清洗\n"
-            "- 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。\n"
-            "- 清洗时不得删除原文中的任何内容，不得遗漏任何段落或句子。\n"
-            "- 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中。"
-        )
+        return """## Step C：清洗
+- 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。
+- 清洗时不得删除原文中的任何内容，不得遗漏任何段落或句子。
+- 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中。"""
 
     def _compose_step_d_block(self) -> str:
         """Step D: 分段，仅当开启 segment 时传入"""
@@ -786,12 +770,10 @@ class PostSplitterPlugin(Star):
             return ""
         count_rule = self._build_segment_count_rule_text().strip()
         count_text = f" {count_rule}" if count_rule else ""
-        return (
-            "## Step D：分段\n"
-            f"- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出最终 `segments`。{count_text}\n"
-            "- `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。\n"
-            "- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。"
-        )
+        return f"""## Step D：分段
+- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出最终 `segments`。{count_text}
+- `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。
+- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。"""
 
     def _local_split_target_length(self, text: str) -> int:
         source = str(text or "")
@@ -896,13 +878,13 @@ class PostSplitterPlugin(Star):
         stack: List[str] = []
         quote_chars = {'"', "'", '`'}
         pair_map = {
-            '“': '”',
+            '"': '"',
             '《': '》',
             '（': '）',
             '(': ')',
             '[': ']',
             '{': '}',
-            '‘': '’',
+            '\u2018': '\u2019',  # Chinese single quotes
             '【': '】',
             '<': '>',
         }
@@ -1063,7 +1045,7 @@ class PostSplitterPlugin(Star):
             self._debug(f"打回重写原始输出 provider={provider_id} output={text[:3000]}")
             return text, elapsed, False
         except Exception as e:
-            logger.warning(f"[ReplyPolisher] 打回重生成失败: {e}")
+            logger.warning(f"[PostSplitter] 打回重生成失败: {e}")
             return "", 0.0, True
 
     async def _send_retry_notice(self, event: AstrMessageEvent):
@@ -1084,7 +1066,7 @@ class PostSplitterPlugin(Star):
             await self.context.send_message(event.unified_msg_origin, mc)
             await asyncio.sleep(0.8)
         except Exception as e:
-            logger.warning(f"[ReplyPolisher] 发送打回提示失败: {e}")
+            logger.warning(f"[PostSplitter] 发送打回提示失败: {e}")
 
     def _serialize_chain_for_processing(
         self, original_chain: List[BaseMessageComponent]
@@ -1216,15 +1198,12 @@ class PostSplitterPlugin(Star):
         reason = str(judge_data.get("reason") or "").strip()
         self._debug(f"初审 action={action}, reason={reason}")
 
-        # 检查清洗后是否丢失占位符，如果丢失则补回
         clean_text = str(judge_data.get("clean_text") or "").strip()
         original_placeholders = self.PLACEHOLDER_PATTERN.findall(original_text)
         if original_placeholders:
             cleaned_placeholders = self.PLACEHOLDER_PATTERN.findall(clean_text)
-            # 如果原文有占位符但清洗后丢失了，补回到 clean_text 末尾
             if len(cleaned_placeholders) < len(original_placeholders):
                 missing = [p for p in original_placeholders if p not in cleaned_placeholders]
-                # 补回丢失的占位符到 clean_text 末尾
                 judge_data["clean_text"] = clean_text + "".join(missing)
                 self._warn(f"清洗后占位符丢失，已自动补回。丢失的占位符={missing}")
 
@@ -1278,7 +1257,6 @@ class PostSplitterPlugin(Star):
         final_text = "\n".join([s for s in segments_text if s]).strip()
         if not final_text:
             return
-        # 非调试模式下输出原文本和最终结果
         self._info(f"原文本：{original_text}")
         if process_elapsed is None:
             self._info(f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}")
@@ -1299,9 +1277,9 @@ class PostSplitterPlugin(Star):
         if not result or not getattr(result, "chain", None):
             return
 
-        if getattr(result, "__reply_polisher_processed", False):
+        if getattr(result, "__post_splitter_processed", False):
             return
-        setattr(result, "__reply_polisher_processed", True)
+        setattr(result, "__post_splitter_processed", True)
 
         if not bool(self._cfg("enable_group_process", True)):
             group_id = getattr(getattr(event, "message_obj", None), "group_id", None)
@@ -1349,7 +1327,7 @@ class PostSplitterPlugin(Star):
                 try:
                     await self._send_segment_prefixes(event, segments)
                 except Exception as e:
-                    logger.error(f"[ReplyPolisher] 主动发送前置分段失败: {e}", exc_info=True)
+                    logger.error(f"[PostSplitter] 主动发送前置分段失败: {e}", exc_info=True)
                     if bool(self._cfg("fallback_to_original_on_error", True)):
                         result.chain.clear()
                         result.chain.extend(original_chain)
@@ -1359,7 +1337,7 @@ class PostSplitterPlugin(Star):
                 result.chain.extend(segments[-1])
                 self._debug(f"最终分为 {len(segments)} 段")
         except Exception as e:
-            logger.error(f"[ReplyPolisher] 审查/重写流程失败: {e}", exc_info=True)
+            logger.error(f"[PostSplitter] 审查/重写流程失败: {e}", exc_info=True)
             if bool(self._cfg("fallback_to_original_on_error", True)):
                 return
             result.chain.clear()
