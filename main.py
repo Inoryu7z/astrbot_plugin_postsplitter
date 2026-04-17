@@ -1,8 +1,9 @@
-import asyncio
+﻿import asyncio
 import copy
 import json
 import re
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -70,6 +71,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
 6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。
 7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。
 
+{{retry_rule_block}}
 {{retry_judge_block}}
 {{retry_clean_block}}
 {{retry_segment_block}}
@@ -86,7 +88,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.3.3",
+    "1.3.4",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -164,7 +166,7 @@ class PostSplitterPlugin(Star):
         return mode
 
     def _forced_local_reason(self) -> str:
-        return str(self._cfg("force_local_fallback_reason", DEFAULT_FORCE_LOCAL_REASON) or DEFAULT_FORCE_LOCAL_REASON).strip()
+        return DEFAULT_FORCE_LOCAL_REASON
 
     def _should_force_local_fallback(self, judge_data: Optional[Dict[str, Any]]) -> bool:
         if not isinstance(judge_data, dict):
@@ -672,8 +674,7 @@ class PostSplitterPlugin(Star):
   "reason_type": "normal|system_error|persona_mismatch|weird_text|other",
   "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {forced_reason}",
   "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",
-  "segments": ["基于 clean_text 的分段结果；若启用了分段则不得为空"],
-  "confidence": 0.0
+  "segments": ["基于 clean_text 的分段结果；若启用了分段则不得为空"]
 }}'''
         return f'''只能输出 JSON，不要输出解释、前后缀、Markdown：
 
@@ -681,8 +682,7 @@ class PostSplitterPlugin(Star):
   "action": "accept 或 reject_and_retry",
   "reason_type": "normal|system_error|persona_mismatch|weird_text|other",
   "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {forced_reason}",
-  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",
-  "confidence": 0.0
+  "clean_text": "清洗后的完整文本；若 action=accept 则不得为空"
 }}'''
 
     def _compose_placeholder_rule_block(self, reply_text: str) -> str:
@@ -990,7 +990,6 @@ class PostSplitterPlugin(Star):
             "judge_rule_block": self._compose_judge_rule_block(),
             "clean_rule_block": self._compose_clean_rule_block(),
             "segment_rule_block": self._compose_segment_rule_block(),
-            "retry_rule_block": self._compose_retry_rule_block(),
             "placeholder_rule_block": self._compose_placeholder_rule_block(reply_text),
             "output_format_block": self._compose_output_format_block(),
             "reject_reason": reject_reason,
@@ -1028,6 +1027,7 @@ class PostSplitterPlugin(Star):
             "reply_text": reply_text,
             "user_message": getattr(event, "message_str", "") or "",
             "reject_reason": reject_reason or "回复不适合直接发送",
+            "retry_rule_block": self._compose_retry_rule_block(),
             "retry_judge_block": self._compose_judge_rule_block(),
             "retry_clean_block": self._compose_clean_rule_block(),
             "retry_segment_block": self._compose_segment_rule_block(),
@@ -1199,11 +1199,21 @@ class PostSplitterPlugin(Star):
         self._debug(f"初审 action={action}, reason={reason}")
 
         clean_text = str(judge_data.get("clean_text") or "").strip()
+        if not clean_text:
+            self._warn("clean_text 为空，已 fallback 到原文")
+            clean_text = original_text
+            judge_data["clean_text"] = clean_text
         original_placeholders = self.PLACEHOLDER_PATTERN.findall(original_text)
         if original_placeholders:
             cleaned_placeholders = self.PLACEHOLDER_PATTERN.findall(clean_text)
-            if len(cleaned_placeholders) < len(original_placeholders):
-                missing = [p for p in original_placeholders if p not in cleaned_placeholders]
+            original_counter = Counter(original_placeholders)
+            cleaned_counter = Counter(cleaned_placeholders)
+            missing = []
+            for ph, count in original_counter.items():
+                missing_count = count - cleaned_counter.get(ph, 0)
+                if missing_count > 0:
+                    missing.extend([ph] * missing_count)
+            if missing:
                 judge_data["clean_text"] = clean_text + "".join(missing)
                 self._warn(f"清洗后占位符丢失，已自动补回。丢失的占位符={missing}")
 

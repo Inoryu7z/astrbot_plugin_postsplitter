@@ -130,12 +130,6 @@
   "editor_language": "markdown",
   "editor_theme": "vs-dark"
  },
- "force_local_fallback_reason": {
-  "description": "特殊拒绝原因",
-  "hint": "当后处理模型返回该 reason 时，忽略模型结果并直接回退到本地分段。通常保持默认值即可。",
-  "type": "string",
-  "default": "内容涉及不适合主题，拒绝处理"
- },
  "judge_prompt_template": {
   "description": "最终提示词",
   "hint": "支持占位符：{{judge_rule_block}} {{clean_rule_block}} {{segment_rule_block}} {{retry_rule_block}} {{placeholder_rule_block}} {{output_format_block}} {{reply_text}}",
@@ -147,9 +141,9 @@
  },
  "retry_prompt_template": {
   "description": "打回提示词",
-  "hint": "支持占位符：{{retry_judge_block}} {{retry_clean_block}} {{retry_segment_block}} {{placeholder_rule_block}} {{reply_text}} {{reject_reason}}",
+  "hint": "支持占位符：{{retry_rule_block}} {{retry_judge_block}} {{retry_clean_block}} {{retry_segment_block}} {{placeholder_rule_block}} {{reply_text}} {{reject_reason}}",
   "type": "text",
-  "default": "# 任务\n你正在继续一段聊天。上一版候选回复由于不适合直接发送，被系统打回重写。\n\n## 要求\n1. 重新生成一版可以直接发给用户的最终回复。\n2. 不要提到系统、报错、重试、模型、超时、工具调用、审查等幕后信息。\n3. 只根据当前已启用的要求生成，不要自行添加额外格式要求。\n4. 只输出最终回复正文，不要解释。\n5. 不得改变原意，不得新增原文不存在的事实、设定、关系、时间、地点、金额、数字、经历。\n6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。\n7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。\n\n{{retry_judge_block}}\n{{retry_clean_block}}\n{{retry_segment_block}}\n{{placeholder_rule_block}}\n\n## 上下文\n- 上一版候选回复：{{reply_text}}\n- 打回原因：{{reject_reason}}",
+  "default": "# 任务\n你正在继续一段聊天。上一版候选回复由于不适合直接发送，被系统打回重写。\n\n## 要求\n1. 重新生成一版可以直接发给用户的最终回复。\n2. 不要提到系统、报错、重试、模型、超时、工具调用、审查等幕后信息。\n3. 只根据当前已启用的要求生成，不要自行添加额外格式要求。\n4. 只输出最终回复正文，不要解释。\n5. 不得改变原意，不得新增原文不存在的事实、设定、关系、时间、地点、金额、数字、经历。\n6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。\n7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。\n\n{{retry_rule_block}}\n{{retry_judge_block}}\n{{retry_clean_block}}\n{{retry_segment_block}}\n{{placeholder_rule_block}}\n\n## 上下文\n- 上一版候选回复：{{reply_text}}\n- 打回原因：{{reject_reason}}",
   "editor_mode": true,
   "editor_language": "markdown",
   "editor_theme": "vs-dark"
@@ -172,7 +166,7 @@
  },
  "preserve_mode": {
   "description": "保真校验等级",
-  "hint": "off：关闭校验，完全相信模型。basic：校验 URL、代码块、数字。strict：额外校验富媒体占位符，最保守。",
+  "hint": "off：关闭保真校验，完全信任模型结果。basic：校验 URL、代码块、数字等关键内容，@提及仅记录提示日志，不会因此回退。strict：在 basic 基础上额外校验富媒体占位符，最保守。",
   "type": "string",
   "options": [
    "off",
