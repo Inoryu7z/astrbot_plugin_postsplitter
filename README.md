@@ -2,7 +2,7 @@
 
 # ✂️ PostSplitter · 后处理分段器
 
-一个基于 LLM 的回复后处理分段器。
+一个 LLM 驱动的回复分段器。
 它在主模型生成回复后介入，优先对回复做自然分段，使输出更接近即时聊天中的发送节奏；同时支持按需叠加轻量清洗、规则审查与打回重生成。
 
 插件整体采用保守策略：尽量不改原意，不额外补写事实；当处理结果不可靠、组件无法安全恢复或校验不通过时，会优先回退原回复。
@@ -102,70 +102,70 @@
 
 ### 基础项
 
-- `polisher_provider_id`：后处理使用的独立模型 provider
-- `secondary_provider_id`：备用后处理模型 provider
-- `post_process_timeout_seconds`：单模型调用超时秒数
-- `enable_group_process`：是否处理群聊
-- `enable_reply`：第一段是否保留引用回复
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `polisher_provider_id` | 后处理模型 provider | — |
+| `secondary_provider_id` | 备用模型 provider | — |
+| `post_process_timeout_seconds` | 单模型调用超时秒数 | `30` |
+| `enable_group_process` | 是否处理群聊 | `true` |
+| `enable_reply` | 第一段是否保留引用回复 | `true` |
 
-### 分段相关
+### 分段
 
-- `enable_segment`：是否启用分段
-- `segment_preference`：分段偏好，可选更自然或更均衡
-- `enable_segment_count_range`：是否启用段数限制
-- `min_segments`：最小段数
-- `max_segments`：最大段数
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `enable_segment` | 是否启用分段 | `true` |
+| `segment_preference` | 分段偏好：`off` / `balanced` / `humanized` | `humanized` |
+| `enable_segment_count_range` | 是否启用段数限制 | `true` |
+| `min_segments` | 最小段数 | `2` |
+| `max_segments` | 最大段数 | `5` |
 
-### 延迟相关
+### 延迟
 
-- `segment_delay_mode`：分段发送延迟模式
-- `segment_fixed_delay`：固定延迟秒数
-- `segment_delay_per_char`：按字数线性延迟时的每字秒数
-- `segment_delay_max`：单段延迟上限
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `segment_delay_mode` | 延迟模式：`fixed` / `linear` | `linear` |
+| `segment_fixed_delay` | 固定延迟秒数 | `0.8` |
+| `segment_delay_per_char` | 每字延迟秒数 | `0.08` |
+| `segment_delay_max` | 单段延迟上限 | `5.0` |
 
-### 清洗相关
+### 清洗
 
-- `enable_clean`：是否启用清洗
-- `clean_prompt_template`：清洗规则模板
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `enable_clean` | 是否启用清洗 | `true` |
+| `clean_prompt_template` | 清洗规则模板 | 见配置界面 |
 
-### 审查与打回相关
+### 判别与打回
 
-- `enable_review`：是否启用审查与打回
-- `persona_style_rules`：额外审查规则
-- `judge_prompt_template`：后处理主提示词
-- `retry_prompt_template`：打回重生成提示词
-- `enable_retry_notice`：是否在打回前发送一条过渡语
-- `retry_notice_pool`：过渡语列表
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `enable_review` | 是否启用判别与打回 | `false` |
+| `persona_style_rules` | 判别规则 | 见配置界面 |
+| `judge_prompt_template` | 后处理主提示词 | 见配置界面 |
+| `retry_prompt_template` | 打回重生成提示词 | 见配置界面 |
+| `retry_notice_pool` | 过渡语列表，留空则不启用 | 见配置界面 |
 
 ### 兜底与调试
 
-- `preserve_mode`：保真校验等级
-- `fallback_to_original_on_error`：异常时是否回退原回复
-- `debug_log`：是否输出调试日志
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `preserve_mode` | 保真校验等级：`off` / `basic` / `strict` | `basic` |
+| `debug_log` | 是否输出调试日志 | `false` |
 
 ---
 
 ## 📌 使用建议
 
-如果你只是想把回复自然拆成多条消息，推荐这样开：
+**最简上手**：配置 `polisher_provider_id`，其余保持默认即可。
 
-- 启用 `enable_segment`
-- 关闭 `enable_clean`
-- 关闭 `enable_review`
+| 需求 | 分段 | 清洗 | 判别与打回 |
+|------|:----:|:----:|:---------:|
+| 只拆成多条消息 | ✅ | ❌ | ❌ |
+| 顺手修整表达 | ✅ | ✅ | ❌ |
+| 约束输出风格 | ✅ | ✅ | ✅ |
 
-如果你还想顺手把一些“不太适合直接发出去”的表达保守修整一下，推荐这样开：
-
-- 启用 `enable_segment`
-- 启用 `enable_clean`
-- 关闭 `enable_review`
-
-如果你对输出格式、人设一致性或禁用表达有要求，再启用：
-
-- `enable_review`
-
-你可以把人设的语言风格输入进去让模型一并审查，检查是否 OOC ，但要注意模型的能力是否足够。建议不要一开始就把规则写得过重。
-
-尤其在启用打回重生成时，规则越多，越容易增加重写概率和不稳定性。实际使用中，通常先把分段跑稳定，再逐步增加清洗和审查规则会更合适。
+启用判别与打回时，建议先用便宜、稳定的小模型跑一段时间，不要一开始就把规则写得过重。规则越多，越容易增加重写概率和不稳定性。通常先把分段跑稳定，再逐步增加清洗和判别规则更合适。
 
 ---
 
@@ -174,12 +174,8 @@
 1. 未配置 `polisher_provider_id` 时，插件不会执行后处理。
 2. 多段消息中，前置段由插件主动发送，最后一段交给框架继续发送。
 3. 若回复中包含无法安全复制的富媒体组件，插件会直接跳过本次后处理。
-4. 若开启审查与打回，最终重生成结果仍会再次复审；若复审不过，会回退到原结果或首轮结果。
-5. 为避免关键信息丢失，插件会尽量保护 URL、数字、代码块、@提及和组件占位符；其中 @提及默认只做提示级校验，不会因缺失直接回退。
-6. 若后处理模型命中特殊拒绝原因 `内容涉及不适合主题，拒绝处理`，插件会忽略该次模型结果并直接切换到本地 fallback 分段，避免分段失效。
-7. 本地 fallback 默认最多保留 12 段；若开启“限制段数”，则优先服从 `min_segments / max_segments`。
-8. `preserve_mode` 中，`off` 表示完全信任模型结果；`basic` 会校验 URL、代码块、数字等关键内容；`strict` 会在此基础上额外校验富媒体占位符。
-9. 若开启 `debug_log`，日志中会记录较长的提示词和模型输出，调试完成后建议关闭。
+4. 若开启判别与打回，最终重生成结果仍会再次复审；若复审不过，会回退到原结果或首轮结果。
+5. 若开启 `debug_log`，日志中会记录较长的提示词和模型输出，调试完成后建议关闭。
 
 ---
 

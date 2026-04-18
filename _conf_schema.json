@@ -13,27 +13,27 @@
  },
  "polisher_provider_id": {
   "description": "主模型",
-  "hint": "后处理主 provider，用于审查、清洗、分段、打回重写与复审。",
+  "hint": "用于分段、清洗与审查的后处理模型。",
   "type": "string",
   "default": "",
   "_special": "select_provider"
  },
  "secondary_provider_id": {
   "description": "备用模型",
-  "hint": "主模型超时或失败后自动切换。备用模型也失败后，若开启分段则仅做本地分段。",
+  "hint": "主模型超时或失败时自动切换，均失败则回退本地分段或原文。",
   "type": "string",
   "default": "",
   "_special": "select_provider"
  },
  "post_process_timeout_seconds": {
   "description": "单模型超时秒数",
-  "hint": "主模型与备用模型共用同一超时。任一阶段单次调用超过该时长即切换下一个模型；主备都失败后回退本地分段/原文。默认 30 秒。",
+  "hint": "单次调用超过此时长即切换模型。默认 30 秒。",
   "type": "float",
   "default": 30.0
  },
  "enable_segment": {
   "description": "分段",
-  "hint": "是否启用分段。关闭后仅输出单段 clean_text；主备模型都失败时也不会做本地分段。",
+  "hint": "关闭后仅输出单段文本。",
   "type": "bool",
   "default": true
  },
@@ -50,19 +50,19 @@
  },
  "enable_segment_count_range": {
   "description": "限制段数",
-  "hint": "开启后使用最小/最大段数。超出上限时会自动合并更合适的相邻段，不会截断内容。",
+  "hint": "开启后使用最小/最大段数。超出上限时自动合并相邻段，不会截断内容。",
   "type": "bool",
   "default": true
  },
  "min_segments": {
   "description": "最小段数",
-  "hint": "开启限制段数后生效。",
+  "hint": "",
   "type": "int",
   "default": 2
  },
  "max_segments": {
   "description": "最大段数",
-  "hint": "开启限制段数后生效。",
+  "hint": "",
   "type": "int",
   "default": 5
  },
@@ -96,13 +96,13 @@
  },
  "enable_clean": {
   "description": "清洗",
-  "hint": "是否启用清洗。",
+  "hint": "按自定义规则对回复做格式整理、符号修正、错别字修正等轻量处理。",
   "type": "bool",
   "default": true
  },
  "clean_prompt_template": {
   "description": "清洗提示词",
-  "hint": "填写清洗规则。",
+  "hint": "自定义清洗规则，如繁简统一、空行压缩、非术语英文清洗等。",
   "type": "text",
   "default": "# 清洗要求\n- 清洗异体字\n- 清洗繁体字\n- 清洗非术语英文\n- 清洗空行：只允许换行，不允许空白行或连续空行\n- 清洗掉分段末尾的句号（即一个分段绝无可能以单句号作结尾）\n- 补全超长连续文本中明显缺失的标点符号，使语句更自然（不要补充句尾标点）\n- 只允许做格式、符号、空行、错别字、异体字、繁简体、非术语英文等层面的修正\n- 不得新增、删除、改写事实信息\n- 不得改变原意",
   "editor_mode": true,
@@ -111,13 +111,13 @@
  },
  "enable_review": {
   "description": "判别与打回",
-  "hint": "是否启用判别与打回。",
+  "hint": "按自定义规则判断回复是否适合发送，不适合时打回重写。",
   "type": "bool",
   "default": false
  },
  "persona_style_rules": {
   "description": "判别提示词",
-  "hint": "填写判别规则。",
+  "hint": "自定义判别规则，如禁止括号、禁止 Markdown 格式等。",
   "type": "text",
   "default": "# 额外事项\n- 禁止出现括号\n- 禁止出现 * 号\n- 禁止出现颜文字\n- 禁止出现 Markdown 格式",
   "editor_mode": true,
@@ -126,7 +126,7 @@
  },
  "judge_prompt_template": {
   "description": "最终提示词",
-  "hint": "支持占位符：{{reply_text}} {{reject_reason_block}} {{step_a_block}} {{step_b_block}} {{step_c_block}} {{step_d_block}} {{output_format_block}} {{judge_rule_block}} {{clean_rule_block}} {{segment_rule_block}} {{placeholder_rule_block}}",
+  "hint": "可用占位符：{{reply_text}} {{reject_reason_block}} {{step_a/b/c/d_block}} {{output_format_block}} {{judge/clean/segment/placeholder_rule_block}}",
   "type": "text",
   "default": "# 角色\n你是聊天回复后处理器，负责对候选回复做清洗与分段。\n\n# 已知上下文\n- 候选回复：{{reply_text}}\n{{reject_reason_block}}\n\n# 处理要求\n{{step_a_block}}\n{{step_b_block}}\n{{step_c_block}}\n{{step_d_block}}\n\n{{output_format_block}}\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n{{placeholder_rule_block}}\n\n# 示例\n示例1（补全标点时，只针对类似于本情况中的超长连续文本才选择补）\n原文：好的主人我immediately就来拍张照片一定要喜欢喵\n清洗后：好的主人，我马上就来拍张照片，一定要喜欢喵\n分段后：[\"好的主人，我马上就来拍张照片\", \"一定要喜欢喵\"]\n\n示例2（第一个分段的三个句号是省略号的变式，不可去除；但是第二个分段的句号需要在分段时去除）\n原文：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整👀。\n清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整\n分段后：[\"草，试了好几个路径都发不出去。。。\", \"这个环境的文件发送可能有点问题捏\", \"你等下，我看看有没啥其他办法整\"]\n\n# 严格禁止\n- 不得删除原文中的任何内容，包括文字、符号、占位符\n- 不得遗漏原文中的任何段落或句子",
   "editor_mode": true,
@@ -135,7 +135,7 @@
  },
  "retry_prompt_template": {
   "description": "打回提示词",
-  "hint": "支持占位符：{{reply_text}} {{reject_reason}} {{retry_rule_block}} {{retry_judge_block}} {{retry_clean_block}} {{retry_segment_block}} {{placeholder_rule_block}}",
+  "hint": "可用占位符：{{reply_text}} {{reject_reason}} {{retry_rule/judge/clean/segment_block}} {{placeholder_rule_block}}",
   "type": "text",
   "default": "# 任务\n你正在继续一段聊天。上一版候选回复由于不适合直接发送，被系统打回重写。\n\n## 要求\n1. 重新生成一版可以直接发给用户的最终回复。\n2. 不要提到系统、报错、重试、模型、超时、工具调用、审查等幕后信息。\n3. 只根据当前已启用的要求生成，不要自行添加额外格式要求。\n4. 只输出最终回复正文，不要解释。\n5. 不得改变原意，不得新增原文不存在的事实、设定、关系、时间、地点、金额、数字、经历。\n6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。\n7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。\n\n{{retry_rule_block}}\n{{retry_judge_block}}\n{{retry_clean_block}}\n{{retry_segment_block}}\n{{placeholder_rule_block}}\n\n## 上下文\n- 上一版候选回复：{{reply_text}}\n- 打回原因：{{reject_reason}}",
   "editor_mode": true,
@@ -144,7 +144,7 @@
  },
  "retry_notice_pool": {
   "description": "过渡语池",
-  "hint": "随机发送其中一句。",
+  "hint": "打回重写期间随机发送其中一句作为过渡，留空则不启用过渡语。",
   "type": "list",
   "default": [
    "等我一下",
