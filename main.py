@@ -88,7 +88,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.3.4",
+    "1.3.5",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -488,6 +488,35 @@ class PostSplitterPlugin(Star):
             return None
 
         return [item for item in rebuilt if item]
+
+
+    def _final_placeholder_fallback(self, original_text: str, segments: List[str]) -> List[str]:
+        if not segments:
+            return segments
+        if not self._segment_enabled():
+            return segments
+        original_placeholders = self.PLACEHOLDER_PATTERN.findall(original_text)
+        if not original_placeholders:
+            return segments
+        candidate_text = "\n".join(str(seg or "") for seg in segments if str(seg or "").strip())
+        candidate_placeholders = self.PLACEHOLDER_PATTERN.findall(candidate_text)
+        original_counter = Counter(original_placeholders)
+        candidate_counter = Counter(candidate_placeholders)
+        missing = []
+        for ph, count in original_counter.items():
+            missing_count = count - candidate_counter.get(ph, 0)
+            if missing_count > 0:
+                missing.extend([ph] * missing_count)
+        if not missing:
+            return segments
+        restored = [str(seg or "") for seg in segments]
+        trailing_text = "".join(missing)
+        for idx in range(len(restored) - 1, -1, -1):
+            if restored[idx].strip():
+                restored[idx] = f"{restored[idx]}{trailing_text}"
+                self._warn(f"分段后占位符仍缺失，已补回至最后一段。缺失占位符={missing}")
+                return restored
+        return segments
 
     def _normalize_segments(self, data: Dict[str, Any], fallback_text: str) -> List[str]:
         clean_text = str(data.get("clean_text") or "").strip()
@@ -1219,6 +1248,7 @@ class PostSplitterPlugin(Star):
 
         first_pass_segments = self._normalize_segments(judge_data, original_text)
         first_pass_segments = self._try_restore_trailing_placeholders(original_text, first_pass_segments)
+        first_pass_segments = self._final_placeholder_fallback(original_text, first_pass_segments)
         if action != "reject_and_retry":
             if self._validate_preserved_content(original_text, first_pass_segments):
                 return first_pass_segments, total_model_elapsed, "accept"
@@ -1256,6 +1286,7 @@ class PostSplitterPlugin(Star):
 
         second_segments = self._normalize_segments(second_judge, regenerated)
         second_segments = self._try_restore_trailing_placeholders(regenerated, second_segments)
+        second_segments = self._final_placeholder_fallback(original_text, second_segments)
         if self._validate_preserved_content(original_text, second_segments):
             return second_segments, total_model_elapsed, "rejudge_accept"
 

@@ -1,4 +1,14 @@
-﻿### v1.3.4
+﻿### v1.3.5
+
+**🛡️ 修复：分段后占位符仍丢失的兜底补回**
+* 新增 `_final_placeholder_fallback()` 方法，在 `_normalize_segments()` 和 `_try_restore_trailing_placeholders()` 均执行完毕后做最终兜底检查。
+* 对比原文与最终 segments 中的占位符数量，若仍有缺失则直接追加到最后一个非空段落末尾。
+* 修复当模型的 segments 输出与 clean_text 存在微小文本差异（如标点增删）时，`_reinject_placeholders_into_segments` 逐字符匹配失败导致占位符无法从 clean_text 传递到 segments 的问题。
+* 首次分段路径与重试分段路径均已接入该兜底逻辑。
+
+---
+
+### v1.3.4
 
 **🛡️ 修复：clean_text 为空时 fallback 到原文**
 * 在 `_process_reply()` 中新增 `clean_text` 空值检查。
