@@ -20,8 +20,8 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 你是聊天回复后处理器，负责对候选回复做清洗与分段。
 
 # 已知上下文
-- 用户消息：{{user_message}}
 - 候选回复：{{reply_text}}
+{{reject_reason_block}}
 
 # 处理要求
 {{step_a_block}}
@@ -29,18 +29,12 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 {{step_c_block}}
 {{step_d_block}}
 
-# 输出要求
-只返回 JSON，不要输出解释或前后缀：
-{
-  "action": "accept 或 reject_and_retry",
-  "reason": "实际做了什么处理，不要写审查结论",
-  "clean_text": "清洗后的完整文本",
-  "segments": ["分段结果"]
-}
+{{output_format_block}}
 
 {{judge_rule_block}}
 {{clean_rule_block}}
 {{segment_rule_block}}
+{{placeholder_rule_block}}
 
 # 示例
 示例1（补全标点时，只针对类似于本情况中的超长连续文本才选择补）
@@ -56,7 +50,6 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 # 严格禁止
 - 不得删除原文中的任何内容，包括文字、符号、占位符
 - 不得遗漏原文中的任何段落或句子
-- 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中
 """
 
 DEFAULT_RETRY_PROMPT = """# 任务
@@ -78,7 +71,6 @@ DEFAULT_RETRY_PROMPT = """# 任务
 {{placeholder_rule_block}}
 
 ## 上下文
-- 用户刚刚的话：{{user_message}}
 - 上一版候选回复：{{reply_text}}
 - 打回原因：{{reject_reason}}
 """
@@ -88,7 +80,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.3.5",
+    "1.3.8",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -156,8 +148,7 @@ class PostSplitterPlugin(Star):
     def _any_post_process_enabled(self) -> bool:
         return any([self._review_enabled(), self._clean_enabled(), self._segment_enabled()])
 
-    def _segments_consistency_check_enabled(self) -> bool:
-        return bool(self._cfg("enable_segments_consistency_check", False))
+
 
     def _preserve_mode(self) -> str:
         mode = str(self._cfg("preserve_mode", "basic") or "basic").strip().lower()
@@ -378,7 +369,9 @@ class PostSplitterPlugin(Star):
 
             if left_text and not re.search(r"[。！？?!……~～.．…]$", left_text):
                 punctuation_bonus -= 3.0
-            if right_text and re.match(r"^[，。！？?!、；：,.;:~～.．…]", right_text):
+            if right_text and re.match(r"^[，、；：,;:]", right_text):
+                punctuation_bonus -= 2.0
+            elif right_text and re.match(r"^[。！？?!~～.．…]", right_text):
                 punctuation_bonus += 1.5
 
             return (merged_len + punctuation_bonus, merged_len)
@@ -540,12 +533,7 @@ class PostSplitterPlugin(Star):
                 if self._normalized_compare_text_ignore_segment_breaks(joined_segments) != self._normalized_compare_text_ignore_segment_breaks(clean_text):
                     reinjected = self._reinject_placeholders_into_segments(normalized, clean_text)
                     if reinjected:
-                        if self._segments_consistency_check_enabled():
-                            self._warn("segments 与 clean_text 存在占位符差异，已自动回填占位符并保留分段")
                         return self._apply_segment_limits(reinjected, clean_text or fallback_text)
-                    if self._segments_consistency_check_enabled():
-                        self._warn("segments 与 clean_text 存在可见差异，已优先信任 clean_text 并回退为本地分段")
-                        return self._local_process_segments(clean_text)
             return self._apply_segment_limits(normalized, clean_text or fallback_text)
 
         if clean_text:
@@ -562,7 +550,7 @@ class PostSplitterPlugin(Star):
         return "\n".join(lines).strip()
 
     def _normalize_number_token(self, token: str) -> str:
-        return re.sub(r"\D", "", token or "")
+        return re.sub(r"[^\d.:]", "", token or "")
 
     def _collect_guard_tokens(self, text: str, mode: str) -> Dict[str, List[str]]:
         source = text or ""
@@ -700,7 +688,6 @@ class PostSplitterPlugin(Star):
 
 {{
   "action": "accept 或 reject_and_retry",
-  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",
   "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {forced_reason}",
   "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",
   "segments": ["基于 clean_text 的分段结果；若启用了分段则不得为空"]
@@ -709,7 +696,6 @@ class PostSplitterPlugin(Star):
 
 {{
   "action": "accept 或 reject_and_retry",
-  "reason_type": "normal|system_error|persona_mismatch|weird_text|other",
   "reason": "若 action=accept，必须填写实际处理结果，推荐使用 动作1；动作2 的格式；若不适合继续后处理则固定为 {forced_reason}",
   "clean_text": "清洗后的完整文本；若 action=accept 则不得为空"
 }}'''
@@ -738,12 +724,10 @@ class PostSplitterPlugin(Star):
         clean_prompt_input = str(self._cfg("clean_prompt_template", "") or "").strip()
         return f"""## 清洗规则
 清洗的目标，不只是做表面整理，而是在不改变原意、不新增事实、不删减关键信息的前提下，把不适合直接发送的表达修正为适合直接发送的表达。
-允许处理的方向包括：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。
+允许处理的方向包括：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗等下方清洗要求提及的内容，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。
 若已启用清洗，则必须实际检查并执行必要清洗；不能因为文本整体可发送，就跳过本该执行的清洗动作。
 是否需要清洗，必须严格依据用户配置的清洗要求判断；不要自行发明新的强制清洗项。
 若配置要求命中，则必须执行；若未命中，可保留原文，但需在 reason 中明确写出"无需清洗"。
-但这种修整仅限于让表达更可直接发送，不得改变原意，不得偷换语气立场，不得新增、删减、编造事实内容。
-
 {clean_prompt_input}""".strip()
 
     def _compose_segment_rule_block(self) -> str:
@@ -767,6 +751,11 @@ class PostSplitterPlugin(Star):
         return """## 打回规则
 当问题严重且无法在不改变原意的前提下直接修复时，返回 `reject_and_retry`。重写时仍必须保持原意，不得借机二次创作。
 若问题可通过保守清洗修复，则不要打回。"""
+
+    def _compose_reject_reason_block(self, reject_reason: str) -> str:
+        if not reject_reason:
+            return ""
+        return f"- 打回原因：{reject_reason}"
 
     def _compose_step_a_block(self) -> str:
         """Step A: 特殊拒绝判断，永远开启"""
@@ -915,7 +904,6 @@ class PostSplitterPlugin(Star):
             '{': '}',
             '\u2018': '\u2019',  # Chinese single quotes
             '【': '】',
-            '<': '>',
         }
 
         def flush_current():
@@ -1016,12 +1004,12 @@ class PostSplitterPlugin(Star):
             "step_b_block": self._compose_step_b_block(),
             "step_c_block": self._compose_step_c_block(),
             "step_d_block": self._compose_step_d_block(),
+            "output_format_block": self._compose_output_format_block(),
             "judge_rule_block": self._compose_judge_rule_block(),
             "clean_rule_block": self._compose_clean_rule_block(),
             "segment_rule_block": self._compose_segment_rule_block(),
             "placeholder_rule_block": self._compose_placeholder_rule_block(reply_text),
-            "output_format_block": self._compose_output_format_block(),
-            "reject_reason": reject_reason,
+            "reject_reason_block": self._compose_reject_reason_block(reject_reason),
         }
         prompt = self._render_template(
             str(self._cfg("judge_prompt_template", DEFAULT_JUDGE_PROMPT) or DEFAULT_JUDGE_PROMPT),
@@ -1054,7 +1042,6 @@ class PostSplitterPlugin(Star):
 
         values = {
             "reply_text": reply_text,
-            "user_message": getattr(event, "message_str", "") or "",
             "reject_reason": reject_reason or "回复不适合直接发送",
             "retry_rule_block": self._compose_retry_rule_block(),
             "retry_judge_block": self._compose_judge_rule_block(),
@@ -1078,8 +1065,6 @@ class PostSplitterPlugin(Star):
             return "", 0.0, True
 
     async def _send_retry_notice(self, event: AstrMessageEvent):
-        if not bool(self._cfg("enable_retry_notice", False)):
-            return
         pool = self._cfg("retry_notice_pool", []) or []
         if not isinstance(pool, list):
             return
@@ -1183,7 +1168,7 @@ class PostSplitterPlugin(Star):
             return default
 
     def _calculate_segment_delay(self, text: str) -> float:
-        mode = str(self._cfg("segment_delay_mode", "fixed") or "fixed").strip().lower()
+        mode = str(self._cfg("segment_delay_mode", "linear") or "linear").strip().lower()
         max_delay = self._safe_float(self._cfg("segment_delay_max", 5.0), 5.0)
         if max_delay < 0:
             max_delay = 0.0
@@ -1218,7 +1203,8 @@ class PostSplitterPlugin(Star):
         if exhausted:
             return self._local_process_segments(original_text), total_model_elapsed, "local_after_judge_timeout"
         if not judge_data:
-            return None, total_model_elapsed, "skip"
+            self._warn("审查模型未返回可解析 JSON，已回退本地分段")
+            return self._local_process_segments(original_text), total_model_elapsed, "local_after_json_parse_failure"
         if self._should_force_local_fallback(judge_data):
             self._warn(f"审查模型命中特殊拒绝原因，已忽略模型结果并回退本地分段。reason={self._forced_local_reason()}")
             return self._local_process_segments(original_text), total_model_elapsed, "local_forced_by_reason"
@@ -1259,7 +1245,7 @@ class PostSplitterPlugin(Star):
                 return first_pass_segments, total_model_elapsed, "review_disabled"
             return [original_text], total_model_elapsed, "review_disabled_reverted"
 
-        first_pass_fallback = first_pass_segments if self._validate_preserved_content(original_text, first_pass_segments) else [original_text]
+        first_pass_fallback = first_pass_segments if self._validate_preserved_content(original_text, first_pass_segments) else self._local_process_segments(original_text)
 
         await self._send_retry_notice(event)
         regenerated, elapsed, exhausted = await self._retry_generate(event, original_text, reason)
@@ -1286,8 +1272,8 @@ class PostSplitterPlugin(Star):
 
         second_segments = self._normalize_segments(second_judge, regenerated)
         second_segments = self._try_restore_trailing_placeholders(regenerated, second_segments)
-        second_segments = self._final_placeholder_fallback(original_text, second_segments)
-        if self._validate_preserved_content(original_text, second_segments):
+        second_segments = self._final_placeholder_fallback(regenerated, second_segments)
+        if self._validate_preserved_content(regenerated, second_segments):
             return second_segments, total_model_elapsed, "rejudge_accept"
 
         return first_pass_fallback or [original_text], total_model_elapsed, "rejudge_reverted"
@@ -1298,7 +1284,7 @@ class PostSplitterPlugin(Star):
         final_text = "\n".join([s for s in segments_text if s]).strip()
         if not final_text:
             return
-        self._info(f"原文本：{original_text}")
+        self._info(f"原文本：{original_text[:500]}{"..." if len(original_text) > 500 else ""}")
         if process_elapsed is None:
             self._info(f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}")
         else:
@@ -1345,9 +1331,7 @@ class PostSplitterPlugin(Star):
                 segments_text, process_elapsed, process_mode = await self._process_reply(event, plain_text)
 
                 if not segments_text:
-                    if bool(self._cfg("fallback_to_original_on_error", True)):
-                        return
-                    segments_text = [plain_text]
+                    return
 
                 if not self._segment_enabled() and segments_text:
                     joined = "\n".join(seg for seg in segments_text if seg).strip() or plain_text
@@ -1369,17 +1353,15 @@ class PostSplitterPlugin(Star):
                     await self._send_segment_prefixes(event, segments)
                 except Exception as e:
                     logger.error(f"[PostSplitter] 主动发送前置分段失败: {e}", exc_info=True)
-                    if bool(self._cfg("fallback_to_original_on_error", True)):
-                        result.chain.clear()
-                        result.chain.extend(original_chain)
-                        return
+                    result.chain.clear()
+                    result.chain.extend(original_chain)
+                    return
 
                 result.chain.clear()
                 result.chain.extend(segments[-1])
                 self._debug(f"最终分为 {len(segments)} 段")
         except Exception as e:
             logger.error(f"[PostSplitter] 审查/重写流程失败: {e}", exc_info=True)
-            if bool(self._cfg("fallback_to_original_on_error", True)):
-                return
             result.chain.clear()
             result.chain.extend(original_chain)
+            return

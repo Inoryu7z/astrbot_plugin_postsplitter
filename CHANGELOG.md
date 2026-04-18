@@ -1,4 +1,45 @@
-﻿### v1.3.5
+﻿### v1.3.8
+
+**🛡️ 修复：保真校验相关问题**
+* 复审阶段的保真校验与占位符补回改为使用重生成文本做参照，修复 URL/数字等合理变化被误判为"内容丢失"。
+* `_normalize_number_token` 归一化时保留小数点和冒号，修复 `1.5` 与 `15` 假阳性。
+* 保真校验失败时回退本地分段而非单段原文。
+
+**🧹 清理：移除 `if False` 死代码与 pair_map 中的 `'<': '>'`**
+
+---
+
+### v1.3.7
+
+**🛡️ 修复：JSON 解析与合并评分**
+* JSON 解析失败时走本地分段回退。
+* 弱标点开头段落合并评分改为减分，强标点开头保持正向加分。
+
+**🧹 移除冗余配置项**
+* 移除 `fallback_to_original_on_error`、`enable_segments_consistency_check`、`enable_retry_notice`。
+
+**📝 优化：提示词与清洗规则**
+* 移除用户消息传入，减少注意力干扰。
+* 审查模板新增 `{{output_format_block}}`、`{{placeholder_rule_block}}`、`{{reject_reason_block}}`，去重清洗规则。
+* 清洗指令措辞调整，明确包含"下方清洗要求提及的内容"。
+* INFO 日志截断为 500 字符。
+
+---
+
+### v1.3.6
+
+**🛡️ 修复：配置与代码默认值不一致**
+* `judge_prompt_template` 和 `retry_prompt_template` 配置默认值对齐代码默认。
+* `_compose_output_format_block()` 移除已声明移除的 `reason_type`。
+* `_calculate_segment_delay()` 回退默认值从 `fixed` 改为 `linear`。
+
+**🛡️ 修复：`_judge_reply()` 未传 `user_message`**
+
+**📝 配置 hint 补充完整占位符列表**
+
+---
+
+### v1.3.5
 
 **🛡️ 修复：分段后占位符仍丢失的兜底补回**
 * 新增 `_final_placeholder_fallback()` 方法，在 `_normalize_segments()` 和 `_try_restore_trailing_placeholders()` 均执行完毕后做最终兜底检查。

@@ -109,12 +109,6 @@
   "editor_language": "markdown",
   "editor_theme": "vs-dark"
  },
- "enable_segments_consistency_check": {
-  "description": "分段一致性校验",
-  "hint": "检查 segments 与 clean_text 是否一致。关闭后允许模型输出更自由的分段，不触发回退。",
-  "type": "bool",
-  "default": false
- },
  "enable_review": {
   "description": "判别与打回",
   "hint": "是否启用判别与打回。",
@@ -132,27 +126,21 @@
  },
  "judge_prompt_template": {
   "description": "最终提示词",
-  "hint": "支持占位符：{{judge_rule_block}} {{clean_rule_block}} {{segment_rule_block}} {{retry_rule_block}} {{placeholder_rule_block}} {{output_format_block}} {{reply_text}}",
+  "hint": "支持占位符：{{reply_text}} {{reject_reason_block}} {{step_a_block}} {{step_b_block}} {{step_c_block}} {{step_d_block}} {{output_format_block}} {{judge_rule_block}} {{clean_rule_block}} {{segment_rule_block}} {{placeholder_rule_block}}",
   "type": "text",
-  "default": "# 角色\n你是聊天回复后处理器，负责对候选回复做清洗与分段。\n\n# 已知上下文\n- 候选回复：{{reply_text}}\n\n# 处理顺序\n1. 先判断是否需要打回重写，若严重违规且无法清洗修复则返回 `reject_and_retry`\n2. 再清洗：在不改变原意的前提下修正格式、符号、标点、空行、错别字、异体字、繁简体、非术语英文\n3. 再分段：基于清洗后的文本按语义拆分\n\n# 输出要求\n只返回 JSON，不要输出解释或前后缀：\n{\n \"action\": \"accept 或 reject_and_retry\",\n \"reason\": \"实际做了什么处理，不要写审查结论\",\n \"clean_text\": \"清洗后的完整文本\",\n \"segments\": [\"分段结果\"]\n}\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n\n# 示例\n示例1（补全标点时，只针对类似于本情况中的超长连续文本才选择补）\n原文：好的主人我immediately就来拍张照片一定要喜欢喵\n清洗后：好的主人，我马上就来拍张照片，一定要喜欢喵\n分段后：[\"好的主人，我马上就来拍张照片\", \"一定要喜欢喵\"]\n\n示例2（第一个分段的三个句号是省略号的变式，不可去除；但是第二个分段的句号需要在分段时去除）\n原文：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整👀。\n清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整\n分段后：[\"草，试了好几个路径都发不出去。。。\", \"这个环境的文件发送可能有点问题捏\", \"你等下，我看看有没啥其他办法整\"]\n",
+  "default": "# 角色\n你是聊天回复后处理器，负责对候选回复做清洗与分段。\n\n# 已知上下文\n- 候选回复：{{reply_text}}\n{{reject_reason_block}}\n\n# 处理要求\n{{step_a_block}}\n{{step_b_block}}\n{{step_c_block}}\n{{step_d_block}}\n\n{{output_format_block}}\n\n{{judge_rule_block}}\n{{clean_rule_block}}\n{{segment_rule_block}}\n{{placeholder_rule_block}}\n\n# 示例\n示例1（补全标点时，只针对类似于本情况中的超长连续文本才选择补）\n原文：好的主人我immediately就来拍张照片一定要喜欢喵\n清洗后：好的主人，我马上就来拍张照片，一定要喜欢喵\n分段后：[\"好的主人，我马上就来拍张照片\", \"一定要喜欢喵\"]\n\n示例2（第一个分段的三个句号是省略号的变式，不可去除；但是第二个分段的句号需要在分段时去除）\n原文：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整👀。\n清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整\n分段后：[\"草，试了好几个路径都发不出去。。。\", \"这个环境的文件发送可能有点问题捏\", \"你等下，我看看有没啥其他办法整\"]\n\n# 严格禁止\n- 不得删除原文中的任何内容，包括文字、符号、占位符\n- 不得遗漏原文中的任何段落或句子",
   "editor_mode": true,
   "editor_language": "markdown",
   "editor_theme": "vs-dark"
  },
  "retry_prompt_template": {
   "description": "打回提示词",
-  "hint": "支持占位符：{{retry_rule_block}} {{retry_judge_block}} {{retry_clean_block}} {{retry_segment_block}} {{placeholder_rule_block}} {{reply_text}} {{reject_reason}}",
+  "hint": "支持占位符：{{reply_text}} {{reject_reason}} {{retry_rule_block}} {{retry_judge_block}} {{retry_clean_block}} {{retry_segment_block}} {{placeholder_rule_block}}",
   "type": "text",
   "default": "# 任务\n你正在继续一段聊天。上一版候选回复由于不适合直接发送，被系统打回重写。\n\n## 要求\n1. 重新生成一版可以直接发给用户的最终回复。\n2. 不要提到系统、报错、重试、模型、超时、工具调用、审查等幕后信息。\n3. 只根据当前已启用的要求生成，不要自行添加额外格式要求。\n4. 只输出最终回复正文，不要解释。\n5. 不得改变原意，不得新增原文不存在的事实、设定、关系、时间、地点、金额、数字、经历。\n6. 若包含清洗要求，只能按当前清洗规则处理，不得借机改写内容本身。\n7. 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留，不得删除、改写、翻译、拆开或移动顺序。\n\n{{retry_rule_block}}\n{{retry_judge_block}}\n{{retry_clean_block}}\n{{retry_segment_block}}\n{{placeholder_rule_block}}\n\n## 上下文\n- 上一版候选回复：{{reply_text}}\n- 打回原因：{{reject_reason}}",
   "editor_mode": true,
   "editor_language": "markdown",
   "editor_theme": "vs-dark"
- },
- "enable_retry_notice": {
-  "description": "启用过渡语",
-  "hint": "打回重生成前先发送一条过渡语。",
-  "type": "bool",
-  "default": false
  },
  "retry_notice_pool": {
   "description": "过渡语池",
@@ -174,12 +162,6 @@
    "strict"
   ],
   "default": "basic"
- },
- "fallback_to_original_on_error": {
-  "description": "异常回退",
-  "hint": "插件内部异常时，是否回退原始回复。",
-  "type": "bool",
-  "default": true
  },
  "debug_log": {
   "description": "调试日志",
