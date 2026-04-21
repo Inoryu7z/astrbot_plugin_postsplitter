@@ -47,9 +47,16 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整
 分段后：["草，试了好几个路径都发不出去。。。", "这个环境的文件发送可能有点问题捏", "你等下，我看看有没啥其他办法整"]
 
+示例3（清洗繁体字与异体字；保留英文术语；保留排行列表中的换行但清洗连续空行；分段末尾句号去除；共三段）
+原文：又讓我做報告？上次报告還沒够啊\n\n排行大概這樣：\nreasoning/expert 最強\nbeta/auto 中等\nfast/non-reasoning 最弱\n\n要详细報告自己查去，我才不熬夜給你整這玩意兒。
+清洗后：又让我做报告？上次报告还没够啊\n排行大概这样：\nreasoning/expert 最强\nbeta/auto 中等\nfast/non-reasoning 最弱\n要详细报告自己查去，我才不熬夜给你整这玩意儿
+分段后：["又让我做报告？上次报告还没够啊", "排行大概这样：\nreasoning/expert 最强\nbeta/auto 中等\nfast/non-reasoning 最弱", "要详细报告自己查去，我才不熬夜给你整这玩意儿"]
+
 # 严格禁止
 - 不得删除原文中的任何内容，包括文字、符号、占位符
 - 不得遗漏原文中的任何段落或句子
+- 空行压缩仅指将连续空行或空白行替换为单个换行，绝不意味着删除空行前后的文字内容
+- 若原文由空行分隔为多个段落，每个段落都必须出现在结果中，不得因空行而跳过或删除任何一段
 """
 
 DEFAULT_RETRY_PROMPT = """# 任务
@@ -80,7 +87,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.3.9",
+    "1.4.0",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -724,7 +731,7 @@ class PostSplitterPlugin(Star):
         clean_prompt_input = str(self._cfg("clean_prompt_template", "") or "").strip()
         return f"""## 清洗规则
 清洗的目标，不只是做表面整理，而是在不改变原意、不新增事实、不删减关键信息的前提下，把不适合直接发送的表达修正为适合直接发送的表达。
-允许处理的方向包括：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗等下方清洗要求提及的内容，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。
+允许处理的方向包括：格式整理、符号修正、空行压缩（仅指将连续空行或空白行替换为单个换行，绝不意味着删除空行前后的文字内容）、错别字修正、异体字与繁简统一、非术语英文清洗等下方清洗要求提及的内容，以及对明显别扭、失衡、过脏、过乱、过于不适合直接发送的表述做保守修整。
 若已启用清洗，则必须实际检查并执行必要清洗；不能因为文本整体可发送，就跳过本该执行的清洗动作。
 是否需要清洗，必须严格依据用户配置的清洗要求判断；不要自行发明新的强制清洗项。
 若配置要求命中，则必须执行；若未命中，可保留原文，但需在 reason 中明确写出"无需清洗"。
@@ -780,6 +787,7 @@ class PostSplitterPlugin(Star):
         return """## Step C：清洗
 - 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。
 - 清洗时不得删除原文中的任何内容，不得遗漏任何段落或句子。
+- 空行压缩仅指将连续空行或空白行替换为单个换行，绝不意味着删除空行前后的文字内容。若原文由空行分隔为多个段落，每个段落都必须完整保留在 clean_text 中。
 - 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中。"""
 
     def _compose_step_d_block(self) -> str:
@@ -791,7 +799,8 @@ class PostSplitterPlugin(Star):
         return f"""## Step D：分段
 - 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出最终 `segments`。{count_text}
 - `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。
-- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。"""
+- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。
+- 若 `clean_text` 包含多个段落（由换行分隔），每个段落的内容都必须出现在某个分段中，不得因段落较短或有空行而跳过或删除。"""
 
     def _local_split_target_length(self, text: str) -> int:
         source = str(text or "")
@@ -1191,9 +1200,10 @@ class PostSplitterPlugin(Star):
             mc = MessageChain()
             mc.chain = segment_chain
             await self.context.send_message(event.unified_msg_origin, mc)
-            delay = self._calculate_segment_delay(text_content)
-            if delay > 0:
-                await asyncio.sleep(delay)
+            if idx < len(segments) - 2:
+                delay = self._calculate_segment_delay(text_content)
+                if delay > 0:
+                    await asyncio.sleep(delay)
 
     async def _process_reply(self, event: AstrMessageEvent, original_text: str) -> Tuple[Optional[List[str]], float, str]:
         total_model_elapsed = 0.0
