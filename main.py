@@ -87,7 +87,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.1",
+    "1.4.2",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -1351,7 +1351,8 @@ class PostSplitterPlugin(Star):
                 return
 
         if not self._is_model_generated_reply(event, result):
-            return
+            if not bool(self._cfg("process_all_replies", False)):
+                return
 
         original_chain = list(result.chain)
         plain_text, placeholder_map, has_unsupported = self._serialize_chain_for_processing(original_chain)

@@ -11,6 +11,12 @@
   "type": "bool",
   "default": true
  },
+ "process_all_replies": {
+  "description": "处理所有回复",
+  "hint": "关闭时仅处理 LLM 直接生成的回复；开启后会将插件工具调用等非 LLM 回复也纳入分段与清洗范围。",
+  "type": "bool",
+  "default": false
+ },
  "polisher_provider_id": {
   "description": "主模型",
   "hint": "用于分段、清洗与审查的后处理模型。",
