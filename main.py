@@ -42,14 +42,14 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 清洗后：好的主人，我马上就来拍张照片，一定要喜欢喵
 分段后：["好的主人，我马上就来拍张照片", "一定要喜欢喵"]
 
-示例2（第一个分段的三个句号是省略号的变式，不可去除；但是第二个分段的句号需要在分段时去除）
+示例2（第一个分段的三个句号是省略号的变式，不可去除；清洗阶段保留所有句号，分段阶段去除末尾单个句号）
 原文：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整👀。
-清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整
-分段后：["草，试了好几个路径都发不出去。。。", "这个环境的文件发送可能有点问题捏", "你等下，我看看有没啥其他办法整"]
+清洗后：草，试了好几个路径都发不出去。。。这个环境的文件发送可能有点问题捏。你等下，我看看有没啥其他办法整👀。
+分段后：["草，试了好几个路径都发不出去。。。", "这个环境的文件发送可能有点问题捏", "你等下，我看看有没啥其他办法整👀"]
 
-示例3（清洗繁体字与异体字；保留英文术语；保留排行列表中的换行但清洗连续空行；分段末尾句号去除；共三段）
+示例3（清洗繁体字与异体字；保留英文术语；保留排行列表中的换行但清洗连续空行；分段阶段去除末尾句号；共三段）
 原文：又讓我做報告？上次报告還沒够啊\n\n排行大概這樣：\nreasoning/expert 最強\nbeta/auto 中等\nfast/non-reasoning 最弱\n\n要详细報告自己查去，我才不熬夜給你整這玩意兒。
-清洗后：又让我做报告？上次报告还没够啊\n排行大概这样：\nreasoning/expert 最强\nbeta/auto 中等\nfast/non-reasoning 最弱\n要详细报告自己查去，我才不熬夜给你整这玩意儿
+清洗后：又让我做报告？上次报告还没够啊\n排行大概这样：\nreasoning/expert 最强\nbeta/auto 中等\nfast/non-reasoning 最弱\n要详细报告自己查去，我才不熬夜给你整这玩意儿。
 分段后：["又让我做报告？上次报告还没够啊", "排行大概这样：\nreasoning/expert 最强\nbeta/auto 中等\nfast/non-reasoning 最弱", "要详细报告自己查去，我才不熬夜给你整这玩意儿"]
 
 # 严格禁止
@@ -87,7 +87,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.0",
+    "1.4.1",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -425,7 +425,19 @@ class PostSplitterPlugin(Star):
             if len(normalized) > 12:
                 normalized = self._rebalance_segments_to_target(normalized, 12)
 
+        if bool(self._cfg("strip_segment_trailing_period", True)):
+            normalized = [self._strip_single_trailing_period(seg) for seg in normalized]
+
         return normalized
+
+    @staticmethod
+    def _strip_single_trailing_period(seg: str) -> str:
+        stripped = seg.rstrip()
+        if stripped.endswith("。。"):
+            return stripped
+        if stripped.endswith("。"):
+            return stripped[:-1]
+        return seg
 
     def _reinject_placeholders_into_segments(self, segments: List[str], clean_text: str) -> Optional[List[str]]:
         if not segments:
@@ -750,6 +762,12 @@ class PostSplitterPlugin(Star):
             parts.append(count_rule)
         if pref_rule:
             parts.append(pref_rule)
+        if bool(self._cfg("strip_segment_trailing_period", True)):
+            parts.append(
+                "每个分段不得以单个句号（。）结尾；若分段点恰好落在句号后，必须在 segments 中去除该句号。"
+                "省略号变式（如。。。或。。）不属于单个句号，必须保留。"
+                "注意：clean_text 中保留所有句号不变，仅在 segments 中去除分段末尾的单个句号。"
+            )
         return "\n\n".join(parts).strip()
 
     def _compose_retry_rule_block(self) -> str:
@@ -796,11 +814,20 @@ class PostSplitterPlugin(Star):
             return ""
         count_rule = self._build_segment_count_rule_text().strip()
         count_text = f" {count_rule}" if count_rule else ""
-        return f"""## Step D：分段
-- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出最终 `segments`。{count_text}
-- `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。
-- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。
-- 若 `clean_text` 包含多个段落（由换行分隔），每个段落的内容都必须出现在某个分段中，不得因段落较短或有空行而跳过或删除。"""
+        lines = [
+            f"## Step D：分段",
+            f"- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出最终 `segments`。{count_text}",
+            "- `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。",
+            "- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。",
+            "- 若 `clean_text` 包含多个段落（由换行分隔），每个段落的内容都必须出现在某个分段中，不得因段落较短或有空行而跳过或删除。",
+        ]
+        if bool(self._cfg("strip_segment_trailing_period", True)):
+            lines.append(
+                "- 每个分段不得以单个句号（。）结尾；若分段点恰好落在句号后，必须在 segments 中去除该句号。"
+                "省略号变式（如。。。或。。）不属于单个句号，必须保留。"
+                "clean_text 中保留所有句号不变，仅在 segments 中去除分段末尾的单个句号。"
+            )
+        return "\n".join(lines)
 
     def _local_split_target_length(self, text: str) -> int:
         source = str(text or "")

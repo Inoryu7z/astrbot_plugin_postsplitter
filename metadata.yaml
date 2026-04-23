@@ -1,6 +1,6 @@
 name: astrbot_plugin_postsplitter
 display_name: 后处理分段器
-version: 1.4.0
+version: 1.4.1
 description: LLM 驱动的回复分段器：用大模型做自然分段与自定义清洗，支持审查打回与特殊拒绝回退
 author: Inoryu7z
 repo: https://github.com/Inoryu7z/astrbot_plugin_postsplitter
