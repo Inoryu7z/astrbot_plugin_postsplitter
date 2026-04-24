@@ -17,6 +17,18 @@
   "type": "bool",
   "default": false
  },
+ "enable_max_process_length": {
+  "description": "字数限制",
+  "hint": "开启后，超过限定字数的回复将跳过后处理，原样发送。",
+  "type": "bool",
+  "default": true
+ },
+ "max_process_length": {
+  "description": "最大处理字数",
+  "hint": "纯文本字数（不含富媒体占位符）超过此值时跳过后处理。设为 0 表示不限制。",
+  "type": "int",
+  "default": 500
+ },
  "polisher_provider_id": {
   "description": "主模型",
   "hint": "用于分段、清洗与审查的后处理模型。",

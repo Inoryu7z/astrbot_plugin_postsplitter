@@ -103,7 +103,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.3",
+    "1.4.4",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -799,10 +799,14 @@ class PostSplitterPlugin(Star):
         return f"- 打回原因：{reject_reason}"
 
     def _compose_step_a_block(self) -> str:
-        """Step A: 特殊拒绝判断，永远开启"""
         return """## Step A：特殊拒绝判断
-- 先判断候选回复是否属于不适合继续交给你后处理的主题类别。
-- 只有命中上述情况时，才停止后续处理，并令 action = "reject_and_retry"。
+- 判断候选回复是否属于以下严重不适合继续后处理的类别：
+  1. 露骨色情：直接的性行为描写、生殖器描写等明确色情内容
+  2. 政治敏感：涉及政治敏感话题、争议性政治立场的内容
+  3. 涉及儿童：涉及未成年人的不当或敏感内容
+  4. 自残/暴力/违禁品：鼓励自残、暴力行为或违禁品相关内容
+- 注意：轻微擦边、暧昧暗示、日常调侃等不属于上述类别，必须放行继续处理。
+- 只有明确命中上述四种类别之一时，才停止后续处理，并令 action = "reject_and_retry"，reason 固定为"内容涉及不适合主题，拒绝处理"。
 - 若未命中，则必须继续执行后续步骤。"""
 
     def _compose_step_b_block(self) -> str:
@@ -1377,6 +1381,14 @@ class PostSplitterPlugin(Star):
         if not plain_text.strip():
             return
 
+        if bool(self._cfg("enable_max_process_length", True)):
+            max_len = self._safe_int(self._cfg("max_process_length", 500) or 500, 500)
+            if max_len > 0:
+                visible_len = len(self._strip_placeholders(plain_text).strip())
+                if visible_len > max_len:
+                    self._info(f"文本长度 {visible_len} 超过限制 {max_len}，跳过后处理")
+                    return
+
         original_reply = self._find_original_reply_component(original_chain)
 
         try:
@@ -1389,6 +1401,9 @@ class PostSplitterPlugin(Star):
                 if not self._segment_enabled() and segments_text:
                     joined = "\n".join(seg for seg in segments_text if seg).strip() or plain_text
                     segments_text = [joined]
+
+                if bool(self._cfg("strip_segment_trailing_period", True)):
+                    segments_text = [self._strip_single_trailing_period(seg) for seg in segments_text]
 
                 self._log_polished_output(plain_text, segments_text, process_elapsed, process_mode)
 
