@@ -244,11 +244,15 @@ class PostSplitterPlugin(Star):
 
     def _check_user_input_skip(self, event: AstrMessageEvent) -> Optional[str]:
         raw_text = ""
-        try:
-            raw_text = event.get_message_outline() or ""
-        except Exception:
-            raw_text = event.message_str or ""
-        self._info(f"白名单检测：get_message_outline={repr(raw_text)}, message_str={repr(event.message_str)}")
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj:
+            raw_text = getattr(message_obj, "message_str", "") or ""
+        if not raw_text:
+            try:
+                raw_text = event.get_message_outline() or ""
+            except Exception:
+                raw_text = event.message_str or ""
+        self._info(f"白名单检测：message_obj.message_str={repr(raw_text)}, event.message_str={repr(event.message_str)}")
         if not raw_text.strip():
             return None
 
