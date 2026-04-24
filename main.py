@@ -248,6 +248,7 @@ class PostSplitterPlugin(Star):
             raw_text = event.get_message_outline() or ""
         except Exception:
             raw_text = event.message_str or ""
+        self._info(f"白名单检测：get_message_outline={repr(raw_text)}, message_str={repr(event.message_str)}")
         if not raw_text.strip():
             return None
 
