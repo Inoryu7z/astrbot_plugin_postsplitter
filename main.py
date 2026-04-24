@@ -103,7 +103,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.4",
+    "1.4.5",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -446,9 +446,19 @@ class PostSplitterPlugin(Star):
 
         return normalized
 
-    @staticmethod
-    def _strip_single_trailing_period(seg: str) -> str:
+    def _strip_single_trailing_period(self, seg: str) -> str:
         stripped = seg.rstrip()
+        if not stripped:
+            return seg
+        trailing_ph_match = self.TRAILING_PLACEHOLDERS_PATTERN.search(stripped)
+        if trailing_ph_match and trailing_ph_match.end() == len(stripped):
+            body = stripped[:trailing_ph_match.start()]
+            trailing = trailing_ph_match.group(0)
+            if body.endswith("。。"):
+                return stripped
+            if body.endswith("。"):
+                return body[:-1] + trailing
+            return stripped
         if stripped.endswith("。。"):
             return stripped
         if stripped.endswith("。"):
