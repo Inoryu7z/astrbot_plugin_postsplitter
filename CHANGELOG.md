@@ -1,9 +1,18 @@
+### v1.4.7
+
+**🐛 修复：白名单过滤失效问题**
+* 修复 `skip_command_prefix` 配置项不生效的问题。
+* 原因：`event.get_message_outline()` 和 `event.message_str` 都已被 AstrBot 的 `WakingCheckStage` 剥离了 `/` 前缀。
+* 修复：改为优先读取 `event.message_obj.message_str`，这是消息对象上的原始文本属性，保留唤醒前缀。
+
+---
+
 ### v1.4.6
 
 **🛡️ 新增：白名单指令过滤与纯占位符检测**
 * 新增 `skip_command_prefix` 配置项（默认开启），用户发送以 `/` 开头的消息时跳过本插件处理。
 * 新增 `skip_patterns` 配置项（正则表达式列表），用户原始输入匹配任一规则时跳过处理。
-* 白名单前置匹配用户输入（序列化之前），使用 `event.get_message_outline()` 获取含前缀的原始文本。
+* 白名单前置匹配用户输入（序列化之前），获取含前缀的原始文本。
 * 新增纯占位符检测：序列化后若剥离所有富媒体占位符后剩余文本为空，跳过全部处理。
 * 修复 `process_all_replies=True` 时，纯图片/纯文件等无文本回复被 LLM 错误添加内容的问题。
 
