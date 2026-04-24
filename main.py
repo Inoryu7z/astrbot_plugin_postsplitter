@@ -103,7 +103,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.5",
+    "1.4.6",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -241,6 +241,31 @@ class PostSplitterPlugin(Star):
             return type_name in {"LLM_RESULT", "AGENT_RUNNER_RESULT"}
 
         return getattr(event, "__post_splitter_is_llm_reply", False)
+
+    def _check_user_input_skip(self, event: AstrMessageEvent) -> Optional[str]:
+        raw_text = ""
+        try:
+            raw_text = event.get_message_outline() or ""
+        except Exception:
+            raw_text = event.message_str or ""
+        if not raw_text.strip():
+            return None
+
+        if bool(self._cfg("skip_command_prefix", True)):
+            if raw_text.lstrip().startswith("/"):
+                return "指令前缀 /"
+
+        patterns = self._cfg("skip_patterns", [])
+        if patterns:
+            for pat in patterns:
+                if not pat or not pat.strip():
+                    continue
+                try:
+                    if re.search(pat, raw_text):
+                        return f"自定义规则 {pat}"
+                except re.error:
+                    self._debug(f"自定义跳过规则正则无效，已忽略：{pat}")
+        return None
 
     @staticmethod
     def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -1383,12 +1408,21 @@ class PostSplitterPlugin(Star):
             if not bool(self._cfg("process_all_replies", False)):
                 return
 
+        skip_reason = self._check_user_input_skip(event)
+        if skip_reason:
+            self._info(f"用户输入匹配跳过规则：{skip_reason}，跳过处理")
+            return
+
         original_chain = list(result.chain)
         plain_text, placeholder_map, has_unsupported = self._serialize_chain_for_processing(original_chain)
         if has_unsupported:
             self._debug("检测到不支持的富媒体组件，跳过处理以避免组件位置错位")
             return
         if not plain_text.strip():
+            return
+
+        if not self._strip_placeholders(plain_text).strip():
+            self._info("回复内容仅含富媒体占位符，跳过处理")
             return
 
         if bool(self._cfg("enable_max_process_length", True)):
