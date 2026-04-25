@@ -103,7 +103,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.7",
+    "1.4.8",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -252,7 +252,7 @@ class PostSplitterPlugin(Star):
                 raw_text = event.get_message_outline() or ""
             except Exception:
                 raw_text = event.message_str or ""
-        self._info(f"白名单检测：message_obj.message_str={repr(raw_text)}, event.message_str={repr(event.message_str)}")
+        self._debug(f"白名单检测：message_obj.message_str={repr(raw_text)}, event.message_str={repr(event.message_str)}")
         if not raw_text.strip():
             return None
 
