@@ -103,7 +103,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.8",
+    "1.4.9",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -754,7 +754,7 @@ class PostSplitterPlugin(Star):
             return "不对分段风格做额外限制，请仅根据语义自然度判断是否分段以及如何分段。"
         if pref == "balanced":
             return "分段时，在不破坏语义和表达自然度的前提下，尽量让各段长度更均匀；若内容天然不适合均分，则以语义自然为第一优先。"
-        return '分段时，优先模拟真人在即时聊天中的发送习惯。允许把短促起手句、语气过渡句、临时停顿句单独成段，例如"我去""等等""不是"。相比段长均匀，更优先保留自然聊天节奏。'
+        return '分段时，模拟真人在即时聊天中边想边发的节奏。遇到自然的语气停顿、话题切换、临时改口就切段，单段短至两三个字也没问题——像"嗯""笑死""不对""等一下"这类词单独成段是很正常的。核心原则：按"换气点"切，不为"看起来整齐"而合并。'
 
     def _compose_output_format_block(self) -> str:
         forced_reason = self._forced_local_reason()
@@ -907,9 +907,9 @@ class PostSplitterPlugin(Star):
             return max(12, min(36, text_len // 3 + (1 if text_len % 3 else 0)))
         if pref == "off":
             return 0
-        if text_len <= 36:
+        if text_len <= 24:
             return 0
-        return 18
+        return 10
 
     def _local_is_atomic_token(self, token: str) -> bool:
         if not token:
@@ -946,7 +946,7 @@ class PostSplitterPlugin(Star):
         if not normalized:
             return []
 
-        min_len = 6 if target_length <= 0 else max(6, min(12, target_length // 3))
+        min_len = 4 if target_length <= 0 else max(2, min(12, target_length // 3))
         merged: List[str] = []
         for seg in normalized:
             visible_len = self._visible_len(seg)
