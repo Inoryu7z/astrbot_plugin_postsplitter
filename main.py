@@ -103,7 +103,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.4.9",
+    "1.5.0",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -113,12 +113,14 @@ class PostSplitterPlugin(Star):
     PLACEHOLDER_PATTERN = re.compile(r"\[\[RP_COMP_\d+\]\]")
     TRAILING_PLACEHOLDERS_PATTERN = re.compile(r"(?P<trailing>(?:\[\[RP_COMP_\d+\]\])+)+\s*$")
     LOCAL_SPLIT_PATTERN = re.compile(r"([。！？?!\n]+)")
+    MAX_BRACKET_DEPTH = 8
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._session_lock_refs: Dict[str, int] = {}
+        self._session_lock_last_used: Dict[str, float] = {}
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -197,6 +199,14 @@ class PostSplitterPlugin(Star):
     @asynccontextmanager
     async def _session_guard(self, event: AstrMessageEvent):
         key = self._get_session_key(event)
+        now = time.time()
+        self._session_lock_last_used[key] = now
+        if len(self._session_locks) > 64:
+            stale_keys = [k for k, t in self._session_lock_last_used.items() if now - t > 300]
+            for sk in stale_keys:
+                self._session_locks.pop(sk, None)
+                self._session_lock_refs.pop(sk, None)
+                self._session_lock_last_used.pop(sk, None)
         lock = self._session_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
@@ -212,6 +222,7 @@ class PostSplitterPlugin(Star):
                 self._session_lock_refs[key] = remain
             else:
                 self._session_lock_refs.pop(key, None)
+                self._session_lock_last_used.pop(key, None)
                 current_lock = self._session_locks.get(key)
                 if current_lock is lock and not lock.locked():
                     self._session_locks.pop(key, None)
@@ -696,7 +707,10 @@ class PostSplitterPlugin(Star):
 
     async def _call_llm(self, provider_id: str, prompt: str) -> str:
         llm_resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
-        return (getattr(llm_resp, "completion_text", "") or "").strip()
+        completion = getattr(llm_resp, "completion_text", "") or ""
+        if not isinstance(completion, str):
+            completion = str(completion) if completion else ""
+        return completion.strip()
 
     async def _call_llm_with_fallback(self, prompt: str, stage: str) -> Tuple[str, Optional[str], float, bool]:
         providers = self._provider_candidates()
@@ -850,7 +864,6 @@ class PostSplitterPlugin(Star):
 - 若未命中，则必须继续执行后续步骤。"""
 
     def _compose_step_b_block(self) -> str:
-        """Step B: 是否需要打回重写，仅当开启 review 时传入"""
         if not self._review_enabled():
             return ""
         return """## Step B：是否需要打回重写
@@ -859,7 +872,6 @@ class PostSplitterPlugin(Star):
 - 若问题可以通过清洗修复，则不得打回，必须继续处理。"""
 
     def _compose_step_c_block(self) -> str:
-        """Step C: 清洗，仅当开启 clean 时传入"""
         if not self._clean_enabled():
             return ""
         return """## Step C：清洗
@@ -868,7 +880,6 @@ class PostSplitterPlugin(Star):
 - 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中。"""
 
     def _compose_step_d_block(self) -> str:
-        """Step D: 分段，仅当开启 segment 时传入"""
         if not self._segment_enabled():
             return ""
         count_rule = self._build_segment_count_rule_text().strip()
@@ -1028,6 +1039,8 @@ class PostSplitterPlugin(Star):
                         stack.pop()
                     else:
                         stack.append(char)
+                        if len(stack) > self.MAX_BRACKET_DEPTH:
+                            stack.clear()
                     current += char
                     i += 1
                     continue
@@ -1038,12 +1051,16 @@ class PostSplitterPlugin(Star):
                         stack.pop()
                     elif char in pair_map and char not in quote_chars:
                         stack.append(char)
+                        if len(stack) > self.MAX_BRACKET_DEPTH:
+                            stack.clear()
                     current += char
                     i += 1
                     continue
 
                 if char in pair_map:
                     stack.append(char)
+                    if len(stack) > self.MAX_BRACKET_DEPTH:
+                        stack.clear()
                     current += char
                     i += 1
                     continue
@@ -1275,21 +1292,29 @@ class PostSplitterPlugin(Star):
         delay = max(0.0, fixed_delay)
         return min(delay, max_delay)
 
-    async def _send_segment_prefixes(self, event: AstrMessageEvent, segments: List[List[BaseMessageComponent]]):
+    async def _send_segment_prefixes(self, event: AstrMessageEvent, segments: List[List[BaseMessageComponent]]) -> int:
+        sent_count = 0
         for idx in range(len(segments) - 1):
             segment_chain = segments[idx]
             text_content = "".join(c.text for c in segment_chain if isinstance(c, Plain))
             stripped = text_content.strip()
             has_non_plain = any(not isinstance(c, Plain) for c in segment_chain)
             if not stripped and not has_non_plain:
+                sent_count += 1
                 continue
-            mc = MessageChain()
-            mc.chain = segment_chain
-            await self.context.send_message(event.unified_msg_origin, mc)
+            try:
+                mc = MessageChain()
+                mc.chain = segment_chain
+                await self.context.send_message(event.unified_msg_origin, mc)
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"[PostSplitter] 发送第 {idx + 1}/{len(segments) - 1} 段前置分段失败: {e}", exc_info=True)
+                break
             if idx < len(segments) - 2:
                 delay = self._calculate_segment_delay(text_content)
                 if delay > 0:
                     await asyncio.sleep(delay)
+        return sent_count
 
     async def _process_reply(self, event: AstrMessageEvent, original_text: str) -> Tuple[Optional[List[str]], float, str]:
         total_model_elapsed = 0.0
@@ -1466,10 +1491,8 @@ class PostSplitterPlugin(Star):
                     self._debug(f"单段结果：{segments_text[0][:300]}")
                     return
 
-                try:
-                    await self._send_segment_prefixes(event, segments)
-                except Exception as e:
-                    logger.error(f"[PostSplitter] 主动发送前置分段失败: {e}", exc_info=True)
+                sent_count = await self._send_segment_prefixes(event, segments)
+                if sent_count == 0 and len(segments) > 1:
                     result.chain.clear()
                     result.chain.extend(original_chain)
                     return

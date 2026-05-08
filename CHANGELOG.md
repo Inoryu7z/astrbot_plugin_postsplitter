@@ -1,3 +1,14 @@
+### v1.5.0
+
+**🛡️ 修复：多项稳定性问题**
+* 修复分段发送失败时用户收到重复内容：前置分段已发出后若发送异常，不再回退完整原文，改为继续发送最后一段，避免已发分段+完整原文的重复问题。
+* 修复 `_call_llm` 对非字符串 `completion_text` 无防护：若 provider 返回非 str 类型（如 list），`strip()` 会抛 `AttributeError`，现已增加类型检查。
+* 修复 `_session_locks` 字典长期运行可能无限增长：新增 TTL 清理机制，当锁条目超过 64 个时自动清理 5 分钟未使用的旧条目。
+* 修复 `_local_split_text_core` 引号/括号栈对不匹配括号脆弱：不匹配的括号会导致栈持续增长，后续内容永远不分段。新增 `MAX_BRACKET_DEPTH=8` 深度限制，超限自动清空栈。
+* 移除 `_compose_step_b/c/d_block` 的多余 docstring，与 `_compose_step_a_block` 保持一致。
+
+---
+
 ### v1.4.9
 
 **📝 优化：拟人化分段提示词重构**
