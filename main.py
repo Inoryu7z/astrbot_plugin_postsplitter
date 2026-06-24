@@ -1294,7 +1294,12 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         delay = max(0.0, fixed_delay)
         return min(delay, max_delay)
 
-    async def _send_segment_prefixes(self, event: AstrMessageEvent, segments: List[List[BaseMessageComponent]]) -> int:
+    async def _send_segment_prefixes(
+        self,
+        event: AstrMessageEvent,
+        segments: List[List[BaseMessageComponent]],
+        sent_count_ref: Optional[List[int]] = None,
+    ) -> int:
         sent_count = 0
         for idx in range(len(segments) - 1):
             segment_chain = segments[idx]
@@ -1309,6 +1314,8 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
                 mc.chain = segment_chain
                 await self.context.send_message(event.unified_msg_origin, mc)
                 sent_count += 1
+                if sent_count_ref is not None:
+                    sent_count_ref[0] = sent_count
             except Exception as e:
                 logger.error(f"[PostSplitter] 发送第 {idx + 1}/{len(segments) - 1} 段前置分段失败: {e}", exc_info=True)
                 break
@@ -1467,6 +1474,11 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
 
         original_reply = self._find_original_reply_component(original_chain)
 
+        # 实时跟踪已发送的前缀段数量，用于异常处理器判断是否可以安全恢复原文。
+        # 如果已有前缀段发送给用户，恢复原文会导致重复内容（前缀段 + 原文）。
+        sent_count_ref = [0]
+        last_segment_chain = None
+
         try:
             async with self._session_guard(event):
                 segments_text, process_elapsed, process_mode = await self._process_reply(event, plain_text)
@@ -1493,17 +1505,34 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
                     self._debug(f"单段结果：{segments_text[0][:300]}")
                     return
 
-                sent_count = await self._send_segment_prefixes(event, segments)
+                # 在发送任何前缀段之前，先保存最后一段并清空 result.chain。
+                # 这样即使发送过程中或发送后发生异常，AstrBot 也不会把原文再发一次，
+                # 避免出现"原文 + 分段"的重复发送问题。
+                last_segment_chain = segments[-1]
+                result.chain.clear()
+
+                sent_count = await self._send_segment_prefixes(event, segments, sent_count_ref)
+
                 if sent_count == 0 and len(segments) > 1:
-                    result.chain.clear()
+                    # 没有任何前缀段被实际发送，可以安全恢复原文
                     result.chain.extend(original_chain)
                     return
 
-                result.chain.clear()
-                result.chain.extend(segments[-1])
+                # 至少有一个前缀段已发送，将最后一段作为最终结果交给框架发送
+                result.chain.extend(last_segment_chain)
                 self._debug(f"最终分为 {len(segments)} 段")
         except Exception as e:
             logger.error(f"[PostSplitter] 审查/重写流程失败: {e}", exc_info=True)
-            result.chain.clear()
-            result.chain.extend(original_chain)
+            if sent_count_ref[0] > 0:
+                # 已有前缀段发送给用户，恢复原文会导致重复内容，
+                # 必须改为设置最后一段作为最终结果
+                if last_segment_chain is not None:
+                    result.chain.clear()
+                    result.chain.extend(last_segment_chain)
+                # 如果 last_segment_chain 为 None，result.chain 已被清空，
+                # 没有安全的恢复方式，只能保持空状态避免重复
+            else:
+                # 没有前缀段被发送，可以安全恢复原文
+                result.chain.clear()
+                result.chain.extend(original_chain)
             return
