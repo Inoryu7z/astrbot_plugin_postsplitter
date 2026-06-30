@@ -57,12 +57,7 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 清洗后：好的
 分段后：["好的"]
 
-示例5（占位符必须原样保留，且不得单独成段：末尾占位符附在前段末尾，不独立成段）
-原文：今天天气真好，出去走走吧。对了，你看这个[[RP_COMP_1]]
-清洗后：今天天气真好，出去走走吧。对了，你看这个[[RP_COMP_1]]
-分段后：["今天天气真好，出去走走吧", "对了，你看这个[[RP_COMP_1]]"]
-
-示例6（换行保留：原文由换行分隔的内容必须完整保留，不得因换行而删除行或合并行）
+示例5（换行保留：原文由换行分隔的内容必须完整保留，不得因换行而删除行或合并行）
 原文：第一行内容\n第二行内容\n第三行内容
 清洗后：第一行内容\n第二行内容\n第三行内容
 分段后：["第一行内容", "第二行内容\n第三行内容"]
@@ -103,7 +98,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.5.1",
+    "1.5.2",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -1102,6 +1097,22 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
             return [str(text or "").strip()] if str(text or "").strip() else []
         return self._local_split_text(text)
 
+    def _restore_stripped_placeholders(self, judge_data: Dict[str, Any], trailing_placeholders: List[str]) -> None:
+        """将剥离的尾部占位符追加回 judge_data 的 clean_text 末尾和 segments 最后一段。"""
+        if not trailing_placeholders or not isinstance(judge_data, dict):
+            return
+        trailing_text = "".join(trailing_placeholders)
+        clean_text = str(judge_data.get("clean_text") or "")
+        if clean_text.strip():
+            judge_data["clean_text"] = clean_text + trailing_text
+        segments = judge_data.get("segments")
+        if isinstance(segments, list):
+            for idx in range(len(segments) - 1, -1, -1):
+                seg_text = str(segments[idx] or "")
+                if seg_text.strip():
+                    segments[idx] = seg_text + trailing_text
+                    break
+
     async def _judge_reply(
         self,
         event: AstrMessageEvent,
@@ -1116,8 +1127,14 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         if not self._any_post_process_enabled():
             return {"action": "accept", "clean_text": reply_text, "segments": [reply_text]}, 0.0, False
 
+        # 发送给 LLM 之前剥离尾部富媒体占位符，避免模型把占位符切为单独分段或与标点粘连成段
+        text_for_llm, trailing_placeholders = self._extract_trailing_placeholders(reply_text)
+        if not text_for_llm.strip():
+            # 防御性兜底：原文仅含占位符（正常应在 on_decorating_result 中被跳过）
+            return {"action": "accept", "clean_text": reply_text, "segments": [reply_text]}, 0.0, False
+
         values = {
-            "reply_text": reply_text,
+            "reply_text": text_for_llm,
             "step_a_block": self._compose_step_a_block(),
             "step_b_block": self._compose_step_b_block(),
             "step_c_block": self._compose_step_c_block(),
@@ -1126,7 +1143,7 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
             "judge_rule_block": self._compose_judge_rule_block(),
             "clean_rule_block": self._compose_clean_rule_block(),
             "segment_rule_block": self._compose_segment_rule_block(),
-            "placeholder_rule_block": self._compose_placeholder_rule_block(reply_text),
+            "placeholder_rule_block": self._compose_placeholder_rule_block(text_for_llm),
             "reject_reason_block": self._compose_reject_reason_block(reject_reason),
         }
         prompt = self._render_template(
@@ -1142,6 +1159,8 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         if not parsed:
             self._warn("审查模型未返回可解析 JSON，本次后处理已跳过")
             return None, elapsed, False
+        # 将剥离的尾部占位符追加回 clean_text 末尾和 segments 最后一段
+        self._restore_stripped_placeholders(parsed, trailing_placeholders)
         return parsed, elapsed, False
 
     async def _retry_generate(
@@ -1158,14 +1177,17 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
             self._debug("未配置主模型，跳过重写")
             return "", 0.0, True
 
+        # 发送给 LLM 之前剥离尾部富媒体占位符，避免模型在重写时误处理占位符
+        text_for_llm, trailing_placeholders = self._extract_trailing_placeholders(reply_text)
+
         values = {
-            "reply_text": reply_text,
+            "reply_text": text_for_llm,
             "reject_reason": reject_reason or "回复不适合直接发送",
             "retry_rule_block": self._compose_retry_rule_block(),
             "retry_judge_block": self._compose_judge_rule_block(),
             "retry_clean_block": self._compose_clean_rule_block(),
             "retry_segment_block": self._compose_segment_rule_block(),
-            "placeholder_rule_block": self._compose_placeholder_rule_block(reply_text),
+            "placeholder_rule_block": self._compose_placeholder_rule_block(text_for_llm),
         }
         prompt = self._render_template(
             str(self._cfg("retry_prompt_template", DEFAULT_RETRY_PROMPT) or DEFAULT_RETRY_PROMPT),
@@ -1176,6 +1198,9 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
             text, provider_id, elapsed, exhausted = await self._call_llm_with_fallback(prompt, stage="打回重写")
             if exhausted:
                 return "", elapsed, True
+            # 将剥离的尾部占位符追加回重写文本末尾
+            if text and text.strip() and trailing_placeholders:
+                text = text + "".join(trailing_placeholders)
             self._debug(f"打回重写原始输出 provider={provider_id} output={text[:3000]}")
             return text, elapsed, False
         except Exception as e:
