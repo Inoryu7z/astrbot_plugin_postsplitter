@@ -1171,6 +1171,30 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
             return [str(text or "").strip()] if str(text or "").strip() else []
         return self._local_split_text(text)
 
+    def split_text_external(self, text: str) -> List[str]:
+        """供其他插件调用的本地分段接口。
+
+        当其他插件通过 context.send_message 直接发送消息（绕过事件管道）时，
+        可调用此方法获取分段结果，自行逐段发送。
+
+        - 走本地 fallback 分段逻辑，不调用后处理 LLM
+        - 受 enable_segment 配置项控制，关闭时返回单段
+        - 句号去除受 strip_local_fallback_period 配置项控制
+        - 不受字数限制、白名单等前置闸门影响（由调用方自行判断）
+        """
+        if not text or not text.strip():
+            return []
+        if not self._segment_enabled():
+            return [text.strip()]
+        segments = self._local_split_text(text)
+        if bool(self._cfg("strip_local_fallback_period", True)):
+            segments = [self._strip_single_trailing_period(seg) for seg in segments]
+        return [seg for seg in segments if seg and seg.strip()]
+
+    def get_segment_delay_external(self, text: str) -> float:
+        """供其他插件获取分段发送延迟（秒）。"""
+        return self._calculate_segment_delay(text)
+
     def _restore_stripped_placeholders(self, judge_data: Dict[str, Any], trailing_placeholders: List[str]) -> None:
         """将剥离的尾部占位符追加回 judge_data 的 clean_text 末尾和 segments 最后一段。"""
         if not trailing_placeholders or not isinstance(judge_data, dict):
