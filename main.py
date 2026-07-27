@@ -98,7 +98,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.5.2",
+    "1.5.3",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -108,6 +108,24 @@ class PostSplitterPlugin(Star):
     PLACEHOLDER_PATTERN = re.compile(r"\[\[RP_COMP_\d+\]\]")
     TRAILING_PLACEHOLDERS_PATTERN = re.compile(r"(?P<trailing>(?:\[\[RP_COMP_\d+\]\])+)+\s*$")
     LOCAL_SPLIT_PATTERN = re.compile(r"([。！？?!\n]+)")
+    EMOJI_PATTERN = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map
+        "\U0001F700-\U0001F77F"  # alchemical
+        "\U0001F780-\U0001F7FF"  # geometric shapes extended
+        "\U0001F800-\U0001F8FF"  # supplemental arrows-C
+        "\U0001F900-\U0001F9FF"  # supplemental symbols
+        "\U0001FA00-\U0001FA6F"  # chess symbols
+        "\U0001FA70-\U0001FAFF"  # symbols extended-A
+        "\U00002600-\U000026FF"  # misc symbols
+        "\U00002700-\U000027BF"  # dingbats
+        "\U0001F1E0-\U0001F1FF"  # regional indicators
+        "\u200d"  # ZWJ
+        "\ufe0f"  # variation selector
+        "]+"
+    )
     MAX_BRACKET_DEPTH = 8
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -963,6 +981,10 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         for seg in normalized:
             visible_len = self._visible_len(seg)
             if merged and visible_len < min_len:
+                # 以强标点 / emoji / 占位符结尾的短段是自然边界，独立保留而不并入前段
+                if self._ends_with_natural_boundary(seg):
+                    merged.append(seg)
+                    continue
                 connector = "" if re.match(r"^[。！？?!]", seg) else "\n"
                 merged[-1] = f"{merged[-1]}{connector}{seg}".strip()
             else:
@@ -985,6 +1007,37 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         if target_length <= 0:
             return visible_len >= 12
         return visible_len >= max(8, target_length // 2)
+
+    def _local_should_split_on_weak_punct(self, current_text: str, delimiter: str, target_length: int) -> bool:
+        """弱标点（，、；：等）的切分阈值高于强标点，避免短段被过度切碎。"""
+        visible_len = self._visible_len(current_text)
+        if visible_len <= 0:
+            return False
+        if target_length <= 0:
+            return visible_len >= 16
+        return visible_len >= max(12, target_length)
+
+    def _local_should_split_on_emoji(self, current_text: str, target_length: int) -> bool:
+        """emoji 是聊天的自然换气点，阈值介于强标点与弱标点之间。"""
+        visible_len = self._visible_len(current_text)
+        if visible_len <= 0:
+            return False
+        if target_length <= 0:
+            return visible_len >= 12
+        return visible_len >= max(10, target_length)
+
+    def _ends_with_natural_boundary(self, text: str) -> bool:
+        """检测文本是否以自然边界结尾（强标点 / emoji / 富媒体占位符），用于判断短段是否应独立保留。"""
+        stripped = str(text or "").rstrip()
+        if not stripped:
+            return False
+        if re.search(r"[。！？?!…]$", stripped):
+            return True
+        ph_matches = list(self.PLACEHOLDER_PATTERN.finditer(stripped))
+        if ph_matches and ph_matches[-1].end() == len(stripped):
+            return True
+        emoji_matches = list(self.EMOJI_PATTERN.finditer(stripped))
+        return bool(emoji_matches and emoji_matches[-1].end() == len(stripped))
 
     def _local_split_text_core(self, text: str, apply_limits: bool) -> List[str]:
         source = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -1078,6 +1131,24 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
                     if self._local_should_split_on_sentence_punct(current, delimiter, target_length):
                         flush_current()
                     i += len(delimiter)
+                    continue
+
+                # 弱标点（逗号/顿号/分号/冒号）：段长已达目标长度时作为切分点
+                if char in "，、；：,;:":
+                    current += char
+                    if self._local_should_split_on_weak_punct(current, char, target_length):
+                        flush_current()
+                    i += 1
+                    continue
+
+                # emoji：段长已达阈值时在 emoji 后切分，模拟聊天的自然换气点
+                emoji_match = self.EMOJI_PATTERN.match(token, i)
+                if emoji_match:
+                    emoji_text = emoji_match.group(0)
+                    current += emoji_text
+                    if self._local_should_split_on_emoji(current, target_length):
+                        flush_current()
+                    i += len(emoji_text)
                     continue
 
                 current += char
