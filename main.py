@@ -98,7 +98,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.5.3",
+    "1.5.4",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -467,7 +467,7 @@ class PostSplitterPlugin(Star):
 
         return [seg for seg in result if seg]
 
-    def _apply_segment_limits(self, segments: List[str], fallback_text: str) -> List[str]:
+    def _apply_segment_limits(self, segments: List[str], fallback_text: str, is_local_fallback: bool = False) -> List[str]:
         normalized = [str(seg).strip() for seg in segments if str(seg).strip()]
         if not normalized:
             return self._build_fallback_segments_from_text(fallback_text)
@@ -495,7 +495,8 @@ class PostSplitterPlugin(Star):
             if len(normalized) > 12:
                 normalized = self._rebalance_segments_to_target(normalized, 12)
 
-        if bool(self._cfg("strip_segment_trailing_period", True)):
+        strip_key = "strip_local_fallback_period" if is_local_fallback else "strip_segment_trailing_period"
+        if bool(self._cfg(strip_key, True)):
             normalized = [self._strip_single_trailing_period(seg) for seg in normalized]
 
         return normalized
@@ -610,11 +611,12 @@ class PostSplitterPlugin(Star):
                 return restored
         return segments
 
-    def _normalize_segments(self, data: Dict[str, Any], fallback_text: str) -> List[str]:
+    def _normalize_segments(self, data: Dict[str, Any], fallback_text: str) -> Tuple[List[str], bool]:
+        """返回 (segments, is_local_fallback)。is_local_fallback 表示最终分段是否来自本地回退路径。"""
         clean_text = str(data.get("clean_text") or "").strip()
         if not self._segment_enabled():
             final_text = clean_text or str(fallback_text or "").strip()
-            return [final_text] if final_text else []
+            return ([final_text] if final_text else []), False
 
         segments = data.get("segments")
         normalized: List[str] = []
@@ -632,13 +634,14 @@ class PostSplitterPlugin(Star):
                 if self._normalized_compare_text_ignore_segment_breaks(joined_segments) != self._normalized_compare_text_ignore_segment_breaks(clean_text):
                     reinjected = self._reinject_placeholders_into_segments(normalized, clean_text)
                     if reinjected:
-                        return self._apply_segment_limits(reinjected, clean_text or fallback_text)
-            return self._apply_segment_limits(normalized, clean_text or fallback_text)
+                        return self._apply_segment_limits(reinjected, clean_text or fallback_text), False
+            return self._apply_segment_limits(normalized, clean_text or fallback_text), False
 
+        # 模型未返回可用 segments，回退到本地分段
         if clean_text:
-            return self._local_process_segments(clean_text)
+            return self._local_process_segments(clean_text), True
         fallback_text = str(fallback_text or "").strip()
-        return self._local_process_segments(fallback_text)
+        return self._local_process_segments(fallback_text), True
 
     def _normalize_url_token(self, token: str) -> str:
         return (token or "").strip().rstrip("'\"）)]}，。！？；：,.!?;:")
@@ -1158,7 +1161,7 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
             segments.append(current.strip())
 
         normalized = self._merge_local_short_segments(segments or [source], target_length)
-        return self._apply_segment_limits(normalized or [source], source) if apply_limits else (normalized or [source])
+        return self._apply_segment_limits(normalized or [source], source, is_local_fallback=True) if apply_limits else (normalized or [source])
 
     def _local_split_text(self, text: str) -> List[str]:
         return self._local_split_text_core(text, apply_limits=True)
@@ -1425,19 +1428,20 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
                     await asyncio.sleep(delay)
         return sent_count
 
-    async def _process_reply(self, event: AstrMessageEvent, original_text: str) -> Tuple[Optional[List[str]], float, str]:
+    async def _process_reply(self, event: AstrMessageEvent, original_text: str) -> Tuple[Optional[List[str]], float, str, bool]:
+        """返回 (segments, elapsed, mode, is_local_fallback)。is_local_fallback 表示最终分段是否来自本地回退路径。"""
         total_model_elapsed = 0.0
 
         judge_data, elapsed, exhausted = await self._judge_reply(event, original_text)
         total_model_elapsed += elapsed
         if exhausted:
-            return self._local_process_segments(original_text), total_model_elapsed, "local_after_judge_timeout"
+            return self._local_process_segments(original_text), total_model_elapsed, "local_after_judge_timeout", True
         if not judge_data:
             self._warn("审查模型未返回可解析 JSON，已回退本地分段")
-            return self._local_process_segments(original_text), total_model_elapsed, "local_after_json_parse_failure"
+            return self._local_process_segments(original_text), total_model_elapsed, "local_after_json_parse_failure", True
         if self._should_force_local_fallback(judge_data):
             self._warn(f"审查模型命中特殊拒绝原因，已忽略模型结果并回退本地分段。reason={self._forced_local_reason()}")
-            return self._local_process_segments(original_text), total_model_elapsed, "local_forced_by_reason"
+            return self._local_process_segments(original_text), total_model_elapsed, "local_forced_by_reason", True
 
         action = str(judge_data.get("action") or "accept").strip().lower()
         reason = str(judge_data.get("reason") or "").strip()
@@ -1462,35 +1466,41 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
                 judge_data["clean_text"] = clean_text + "".join(missing)
                 self._warn(f"清洗后占位符丢失，已自动补回。丢失的占位符={missing}")
 
-        first_pass_segments = self._normalize_segments(judge_data, original_text)
+        first_pass_segments, first_pass_is_local = self._normalize_segments(judge_data, original_text)
         first_pass_segments = self._try_restore_trailing_placeholders(original_text, first_pass_segments)
         first_pass_segments = self._final_placeholder_fallback(original_text, first_pass_segments)
         if action != "reject_and_retry":
             if self._validate_preserved_content(original_text, first_pass_segments):
-                return first_pass_segments, total_model_elapsed, "accept"
-            return [original_text], total_model_elapsed, "accept_but_reverted"
+                return first_pass_segments, total_model_elapsed, "accept", first_pass_is_local
+            return [original_text], total_model_elapsed, "accept_but_reverted", False
 
         if not self._review_enabled():
             if self._validate_preserved_content(original_text, first_pass_segments):
-                return first_pass_segments, total_model_elapsed, "review_disabled"
-            return [original_text], total_model_elapsed, "review_disabled_reverted"
+                return first_pass_segments, total_model_elapsed, "review_disabled", first_pass_is_local
+            return [original_text], total_model_elapsed, "review_disabled_reverted", False
 
-        first_pass_fallback = first_pass_segments if self._validate_preserved_content(original_text, first_pass_segments) else self._local_process_segments(original_text)
+        first_pass_valid = self._validate_preserved_content(original_text, first_pass_segments)
+        if first_pass_valid:
+            first_pass_fallback = first_pass_segments
+            first_pass_fallback_is_local = first_pass_is_local
+        else:
+            first_pass_fallback = self._local_process_segments(original_text)
+            first_pass_fallback_is_local = True
 
         await self._send_retry_notice(event)
         regenerated, elapsed, exhausted = await self._retry_generate(event, original_text, reason)
         total_model_elapsed += elapsed
         if exhausted or not regenerated:
             base_text = "\n\n".join(first_pass_fallback).strip() or original_text
-            return self._local_process_segments(base_text), total_model_elapsed, "local_after_retry_timeout"
+            return self._local_process_segments(base_text), total_model_elapsed, "local_after_retry_timeout", True
 
         second_judge, elapsed, exhausted = await self._judge_reply(event, regenerated, reject_reason=reason)
         total_model_elapsed += elapsed
         if exhausted or not second_judge:
-            return self._local_process_segments(regenerated), total_model_elapsed, "local_after_rejudge_timeout"
+            return self._local_process_segments(regenerated), total_model_elapsed, "local_after_rejudge_timeout", True
         if self._should_force_local_fallback(second_judge):
             self._warn(f"复审模型命中特殊拒绝原因，已忽略模型结果并回退本地分段。reason={self._forced_local_reason()}")
-            return self._local_process_segments(regenerated), total_model_elapsed, "local_forced_by_rejudge_reason"
+            return self._local_process_segments(regenerated), total_model_elapsed, "local_forced_by_rejudge_reason", True
 
         second_action = str(second_judge.get("action") or "accept").strip().lower()
         second_reason = str(second_judge.get("reason") or "").strip()
@@ -1498,15 +1508,19 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
 
         if second_action == "reject_and_retry":
             self._warn("重生成结果复审仍未通过，已回退为首轮结果/原始回复，避免发送二次判退文本")
-            return first_pass_fallback or [original_text], total_model_elapsed, "rejudge_rejected"
+            if first_pass_fallback:
+                return first_pass_fallback, total_model_elapsed, "rejudge_rejected", first_pass_fallback_is_local
+            return [original_text], total_model_elapsed, "rejudge_rejected", False
 
-        second_segments = self._normalize_segments(second_judge, regenerated)
+        second_segments, second_is_local = self._normalize_segments(second_judge, regenerated)
         second_segments = self._try_restore_trailing_placeholders(regenerated, second_segments)
         second_segments = self._final_placeholder_fallback(regenerated, second_segments)
         if self._validate_preserved_content(regenerated, second_segments):
-            return second_segments, total_model_elapsed, "rejudge_accept"
+            return second_segments, total_model_elapsed, "rejudge_accept", second_is_local
 
-        return first_pass_fallback or [original_text], total_model_elapsed, "rejudge_reverted"
+        if first_pass_fallback:
+            return first_pass_fallback, total_model_elapsed, "rejudge_reverted", first_pass_fallback_is_local
+        return [original_text], total_model_elapsed, "rejudge_reverted", False
 
     def _log_polished_output(self, original_text: str, segments_text: List[str], process_elapsed: Optional[float] = None, mode: str = ""):
         if not segments_text:
@@ -1514,7 +1528,8 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         final_text = "\n".join([s for s in segments_text if s]).strip()
         if not final_text:
             return
-        self._info(f"原文本：{original_text[:500]}{"..." if len(original_text) > 500 else ""}")
+        suffix = "..." if len(original_text) > 500 else ""
+        self._info(f"原文本：{original_text[:500]}{suffix}")
         if process_elapsed is None:
             self._info(f"输出完成：{len(segments_text)} 段，总长度 {len(final_text)}")
         else:
@@ -1581,7 +1596,7 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
 
         try:
             async with self._session_guard(event):
-                segments_text, process_elapsed, process_mode = await self._process_reply(event, plain_text)
+                segments_text, process_elapsed, process_mode, is_local_fallback = await self._process_reply(event, plain_text)
 
                 if not segments_text:
                     return
@@ -1590,7 +1605,9 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
                     joined = "\n".join(seg for seg in segments_text if seg).strip() or plain_text
                     segments_text = [joined]
 
-                if bool(self._cfg("strip_segment_trailing_period", True)):
+                # 按路径选择对应的句号去除开关：本地回退路径用 strip_local_fallback_period，模型路径用 strip_segment_trailing_period
+                strip_key = "strip_local_fallback_period" if is_local_fallback else "strip_segment_trailing_period"
+                if bool(self._cfg(strip_key, True)):
                     segments_text = [self._strip_single_trailing_period(seg) for seg in segments_text]
 
                 self._log_polished_output(plain_text, segments_text, process_elapsed, process_mode)
