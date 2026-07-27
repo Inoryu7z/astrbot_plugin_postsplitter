@@ -110,77 +110,38 @@
 
 ## 🛠️ 主要配置项
 
-### 基础项
+所有配置项均可在 AstrBot 配置界面直接修改，下面只列出关键项。
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `polisher_provider_id` | 后处理模型 provider | — |
-| `secondary_provider_id` | 备用模型 provider | — |
-| `post_process_timeout_seconds` | 单模型调用超时秒数 | `30` |
-| `enable_group_process` | 是否处理群聊 | `true` |
-| `enable_reply` | 第一段是否保留引用回复 | `true` |
-| `process_all_replies` | 是否处理工具调用等非 LLM 回复 | `false` |
+**模型与作用范围**
 
-### 白名单与字数限制
+- `polisher_provider_id` — 后处理模型 provider（必填，不填则插件不生效）
+- `secondary_provider_id` — 备用模型，主模型超时或失败时自动切换
+- `enable_group_process` — 是否处理群聊（默认 `true`）
+- `process_all_replies` — 是否处理工具调用等非 LLM 回复（默认 `false`）
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `skip_command_prefix` | 跳过以 `/` 开头的指令消息 | `true` |
-| `skip_patterns` | 自定义跳过规则（正则表达式列表） | `[]` |
-| `enable_max_process_length` | 是否启用字数限制 | `true` |
-| `max_process_length` | 最大处理字数，超过即跳过后处理 | `500` |
+**分段**
 
-### 分段
+- `segment_preference` — 分段偏好：`off` / `balanced` / `humanized`（默认 `humanized`）
+- `min_segments` / `max_segments` — 段数范围（默认 2 ~ 5）
+- 延迟模式 `fixed`（固定）或 `linear`（按字数线性），默认 `linear`
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `enable_segment` | 是否启用分段 | `true` |
-| `segment_preference` | 分段偏好：`off` / `balanced` / `humanized` | `humanized` |
-| `enable_segment_count_range` | 是否启用段数限制 | `true` |
-| `min_segments` | 最小段数 | `2` |
-| `max_segments` | 最大段数 | `5` |
+**清洗 / 判别与打回**
 
-### 延迟
+- `enable_clean` — 是否启用清洗（默认 `true`），规则在 `clean_prompt_template` 自定义
+- `enable_review` — 是否启用判别与打回（默认 `false`），规则在 `persona_style_rules` 自定义
+- `retry_notice_pool` — 打回重写期间随机发送的过渡语，留空则不启用
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `segment_delay_mode` | 延迟模式：`fixed` / `linear` | `linear` |
-| `segment_fixed_delay` | 固定延迟秒数 | `0.8` |
-| `segment_delay_per_char` | 每字延迟秒数 | `0.08` |
-| `segment_delay_max` | 单段延迟上限 | `5.0` |
+**跳过与限制**
 
-### 句号去除
+- `skip_command_prefix` — 跳过 `/` 开头指令（默认 `true`）
+- `skip_patterns` — 自定义正则跳过规则
+- `max_process_length` — 字数上限，超过即跳过后处理（默认 `500`）
 
-控制每个分段是否不得以单个句号结尾（省略号变式如 `。。。` / `。。` 不受影响）。两条开关相互独立，按路径分别生效。
+**兜底**
 
-| 配置项 | 作用路径 | 默认值 |
-|--------|------|--------|
-| `strip_segment_trailing_period` | 模型处理路径 | `true` |
-| `strip_local_fallback_period` | 本地回退路径 | `true` |
-
-### 清洗
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `enable_clean` | 是否启用清洗 | `true` |
-| `clean_prompt_template` | 清洗规则模板 | 见配置界面 |
-
-### 判别与打回
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `enable_review` | 是否启用判别与打回 | `false` |
-| `persona_style_rules` | 判别规则 | 见配置界面 |
-| `judge_prompt_template` | 后处理主提示词 | 见配置界面 |
-| `retry_prompt_template` | 打回重生成提示词 | 见配置界面 |
-| `retry_notice_pool` | 过渡语列表，留空则不启用 | 见配置界面 |
-
-### 兜底与调试
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `preserve_mode` | 保真校验等级：`off` / `basic` / `strict` | `basic` |
-| `debug_log` | 是否输出调试日志 | `false` |
+- `preserve_mode` — 保真校验等级：`off` / `basic` / `strict`（默认 `basic`）
+- `strip_segment_trailing_period` / `strip_local_fallback_period` — 分段末尾去句号，模型路径与本地回退路径独立控制（均默认 `true`，省略号变式不受影响）
+- `debug_log` — 调试日志（默认 `false`）
 
 ---
 
