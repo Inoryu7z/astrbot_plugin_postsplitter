@@ -1,3 +1,12 @@
+### v1.5.5
+
+**📝 优化：合并句号/逗号去除配置项，统一模型与本地回退路径**
+
+* 原有 `strip_segment_trailing_period` 与 `strip_local_fallback_period` 合并为单一配置项 `strip_segment_trailing_period`，同时作用于模型路径与本地回退路径。
+* 新增逗号去除能力：分段末尾的单个逗号（，/,）现在也会被去除，使分段更干净自然。
+
+---
+
 ### v1.5.4
 
 **📝 新增：本地回退独立句号去除开关**

@@ -140,7 +140,7 @@
 **兜底**
 
 - `preserve_mode` — 保真校验等级：`off` / `basic` / `strict`（默认 `basic`）
-- `strip_segment_trailing_period` / `strip_local_fallback_period` — 分段末尾去句号，模型路径与本地回退路径独立控制（均默认 `true`，省略号变式不受影响）
+- `strip_segment_trailing_period` — 分段末尾去句号与逗号，同时作用于模型路径与本地回退路径（默认 `true`，省略号变式不受影响）
 - `debug_log` — 调试日志（默认 `false`）
 
 ---

@@ -98,7 +98,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.5.4",
+    "1.5.5",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -495,8 +495,7 @@ class PostSplitterPlugin(Star):
             if len(normalized) > 12:
                 normalized = self._rebalance_segments_to_target(normalized, 12)
 
-        strip_key = "strip_local_fallback_period" if is_local_fallback else "strip_segment_trailing_period"
-        if bool(self._cfg(strip_key, True)):
+        if bool(self._cfg("strip_segment_trailing_period", True)):
             normalized = [self._strip_single_trailing_period(seg) for seg in normalized]
 
         return normalized
@@ -513,10 +512,14 @@ class PostSplitterPlugin(Star):
                 return stripped
             if body.endswith("。"):
                 return body[:-1] + trailing
+            if body.endswith("，") or body.endswith(","):
+                return body[:-1] + trailing
             return stripped
         if stripped.endswith("。。"):
             return stripped
         if stripped.endswith("。"):
+            return stripped[:-1]
+        if stripped.endswith("，") or stripped.endswith(","):
             return stripped[:-1]
         return seg
 
@@ -854,9 +857,9 @@ class PostSplitterPlugin(Star):
             parts.append(pref_rule)
         if bool(self._cfg("strip_segment_trailing_period", True)):
             parts.append(
-                "每个分段不得以单个句号（。）结尾；若分段点恰好落在句号后，必须在 segments 中去除该句号。"
-                "省略号变式（如。。。或。。）不属于单个句号，必须保留。"
-                "注意：clean_text 中保留所有句号不变，仅在 segments 中去除分段末尾的单个句号。"
+                "每个分段不得以单个句号（。）或逗号（，）结尾；若分段点恰好落在句号或逗号后，"
+                "必须在 segments 中去除该标点。省略号变式（如。。。或。。）不属于单个句号，必须保留。"
+                "注意：clean_text 中保留所有标点不变，仅在 segments 中去除分段末尾的单个句号或逗号。"
             )
         return "\n\n".join(parts).strip()
 
@@ -915,9 +918,9 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         ]
         if bool(self._cfg("strip_segment_trailing_period", True)):
             lines.append(
-                "- 每个分段不得以单个句号（。）结尾；若分段点恰好落在句号后，必须在 segments 中去除该句号。"
-                "省略号变式（如。。。或。。）不属于单个句号，必须保留。"
-                "clean_text 中保留所有句号不变，仅在 segments 中去除分段末尾的单个句号。"
+                "- 每个分段不得以单个句号（。）或逗号（，）结尾；若分段点恰好落在句号或逗号后，"
+                "必须在 segments 中去除该标点。省略号变式（如。。。或。。）不属于单个句号，必须保留。"
+                "clean_text 中保留所有标点不变，仅在 segments 中去除分段末尾的单个句号或逗号。"
             )
         return "\n".join(lines)
 
@@ -1179,7 +1182,7 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
 
         - 走本地 fallback 分段逻辑，不调用后处理 LLM
         - 受 enable_segment 配置项控制，关闭时返回单段
-        - 句号去除受 strip_local_fallback_period 配置项控制
+        - 句号与逗号去除受 strip_segment_trailing_period 配置项控制
         - 不受字数限制、白名单等前置闸门影响（由调用方自行判断）
         """
         if not text or not text.strip():
@@ -1187,7 +1190,7 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
         if not self._segment_enabled():
             return [text.strip()]
         segments = self._local_split_text(text)
-        if bool(self._cfg("strip_local_fallback_period", True)):
+        if bool(self._cfg("strip_segment_trailing_period", True)):
             segments = [self._strip_single_trailing_period(seg) for seg in segments]
         return [seg for seg in segments if seg and seg.strip()]
 
@@ -1629,9 +1632,7 @@ Step A 仅负责内容安全审查（色情/政治/儿童/暴力），不处理�
                     joined = "\n".join(seg for seg in segments_text if seg).strip() or plain_text
                     segments_text = [joined]
 
-                # 按路径选择对应的句号去除开关：本地回退路径用 strip_local_fallback_period，模型路径用 strip_segment_trailing_period
-                strip_key = "strip_local_fallback_period" if is_local_fallback else "strip_segment_trailing_period"
-                if bool(self._cfg(strip_key, True)):
+                if bool(self._cfg("strip_segment_trailing_period", True)):
                     segments_text = [self._strip_single_trailing_period(seg) for seg in segments_text]
 
                 self._log_polished_output(plain_text, segments_text, process_elapsed, process_mode)
