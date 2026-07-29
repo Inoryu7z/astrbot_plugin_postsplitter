@@ -98,7 +98,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.5.5",
+    "1.5.6",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -501,27 +501,59 @@ class PostSplitterPlugin(Star):
         return normalized
 
     def _strip_single_trailing_period(self, seg: str) -> str:
+        """去除分段末尾的单个句号（。）、逗号（，/,）与换行符（\\n）。
+
+        省略号变式（。。）不受影响。
+        循环处理直到无法继续去除，确保「\\n。」、「。\\n」、「。\\n。\\n」等嵌套组合被完全清除。
+        """
         stripped = seg.rstrip()
         if not stripped:
             return seg
+
         trailing_ph_match = self.TRAILING_PLACEHOLDERS_PATTERN.search(stripped)
         if trailing_ph_match and trailing_ph_match.end() == len(stripped):
             body = stripped[:trailing_ph_match.start()]
             trailing = trailing_ph_match.group(0)
-            if body.endswith("。。"):
-                return stripped
-            if body.endswith("。"):
-                return body[:-1] + trailing
-            if body.endswith("，") or body.endswith(","):
-                return body[:-1] + trailing
+            cleaned = self._strip_trailing_punct_and_newline(body)
+            if cleaned != body:
+                return cleaned + trailing
             return stripped
-        if stripped.endswith("。。"):
-            return stripped
-        if stripped.endswith("。"):
-            return stripped[:-1]
-        if stripped.endswith("，") or stripped.endswith(","):
-            return stripped[:-1]
+
+        cleaned = self._strip_trailing_punct_and_newline(stripped)
+        if cleaned != stripped:
+            return cleaned
         return seg
+
+    @staticmethod
+    def _strip_trailing_punct_and_newline(text: str) -> str:
+        """循环去除末尾的换行符与单个句号/逗号，直至无变化。
+        省略号变式（。。）不会被去除。"""
+        body = text
+        while True:
+            changed = False
+            # 去除末尾换行符（rstrip 也会清理连续 \\n）
+            stripped_nl = body.rstrip('\n')
+            if stripped_nl != body:
+                body = stripped_nl
+                changed = True
+
+            # 省略号变式保护：遇到。。则停止去除
+            if body.endswith("。。"):
+                break
+
+            if body.endswith("。"):
+                body = body[:-1]
+                changed = True
+                continue
+
+            if body.endswith("，") or body.endswith(","):
+                body = body[:-1]
+                changed = True
+                continue
+
+            if not changed:
+                break
+        return body
 
     def _reinject_placeholders_into_segments(self, segments: List[str], clean_text: str) -> Optional[List[str]]:
         if not segments:
