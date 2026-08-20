@@ -14,8 +14,6 @@ from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, register
 
 
-DEFAULT_FORCE_LOCAL_REASON = "内容涉及不适合主题，拒绝处理"
-
 DEFAULT_JUDGE_PROMPT = """# 角色
 你是聊天回复后处理器，负责对候选回复做清洗与分段。
 
@@ -32,8 +30,6 @@ DEFAULT_JUDGE_PROMPT = """# 角色
 {{output_format_block}}
 
 {{judge_rule_block}}
-{{clean_rule_block}}
-{{segment_rule_block}}
 {{placeholder_rule_block}}
 
 # 示例
@@ -98,7 +94,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.5.6",
+    "1.5.7",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -189,22 +185,10 @@ class PostSplitterPlugin(Star):
 
 
     def _preserve_mode(self) -> str:
-        mode = str(self._cfg("preserve_mode", "basic") or "basic").strip().lower()
-        if mode not in {"off", "basic", "strict"}:
-            return "basic"
+        mode = str(self._cfg("preserve_mode", "off") or "off").strip().lower()
+        if mode not in {"off", "on"}:
+            return "off"
         return mode
-
-    def _forced_local_reason(self) -> str:
-        return DEFAULT_FORCE_LOCAL_REASON
-
-    def _should_force_local_fallback(self, judge_data: Optional[Dict[str, Any]]) -> bool:
-        if not isinstance(judge_data, dict):
-            return False
-        expected = self._forced_local_reason()
-        if not expected:
-            return False
-        reason = str(judge_data.get("reason") or "").strip()
-        return reason == expected
 
     def _get_session_key(self, event: AstrMessageEvent) -> str:
         return str(getattr(event, "unified_msg_origin", "") or "global")
@@ -689,7 +673,7 @@ class PostSplitterPlugin(Star):
     def _normalize_number_token(self, token: str) -> str:
         return re.sub(r"[^\d.:]", "", token or "")
 
-    def _collect_guard_tokens(self, text: str, mode: str) -> Dict[str, List[str]]:
+    def _collect_guard_tokens(self, text: str) -> Dict[str, List[str]]:
         source = text or ""
         source_without_placeholders = self._strip_placeholders(source)
         numbers = [
@@ -697,16 +681,13 @@ class PostSplitterPlugin(Star):
             for item in self.NUMBER_PATTERN.findall(source_without_placeholders)
             if any(ch.isdigit() for ch in item)
         ]
-        tokens = {
+        return {
             "URL": list(dict.fromkeys(self.URL_PATTERN.findall(source))),
             "代码块": list(dict.fromkeys(self.CODE_FENCE_PATTERN.findall(source))),
             "数字串": list(dict.fromkeys(numbers)),
             "提及": list(dict.fromkeys(self.MENTION_PATTERN.findall(source))),
-            "占位符": [],
+            "占位符": list(dict.fromkeys(self.PLACEHOLDER_PATTERN.findall(source))),
         }
-        if mode == "strict":
-            tokens["占位符"] = list(dict.fromkeys(self.PLACEHOLDER_PATTERN.findall(source)))
-        return tokens
 
     def _validate_preserved_content(self, original_text: str, candidate_segments: List[str]) -> bool:
         mode = self._preserve_mode()
@@ -718,7 +699,7 @@ class PostSplitterPlugin(Star):
         if not original.strip() or not candidate.strip():
             return True
 
-        protected = self._collect_guard_tokens(original, mode)
+        protected = self._collect_guard_tokens(original)
         hard_missing: List[str] = []
         soft_missing: List[str] = []
 
@@ -739,10 +720,9 @@ class PostSplitterPlugin(Star):
             if normalized and normalized not in candidate_numbers:
                 hard_missing.append(f"数字串:{token[:80]}")
 
-        if mode == "strict":
-            for token in protected.get("占位符", []):
-                if token and token not in candidate:
-                    hard_missing.append(f"占位符:{token[:80]}")
+        for token in protected.get("占位符", []):
+            if token and token not in candidate:
+                hard_missing.append(f"占位符:{token[:80]}")
 
         for token in protected.get("提及", []):
             if token and token not in candidate:
@@ -822,13 +802,12 @@ class PostSplitterPlugin(Star):
         return '分段时，模拟真人在即时聊天中边想边发的节奏。遇到自然的语气停顿、话题切换、临时改口就切段，单段短至两三个字也没问题——像"嗯""笑死""不对""等一下"这类词单独成段是很正常的。核心原则：按"换气点"切，不为"看起来整齐"而合并。'
 
     def _compose_output_format_block(self) -> str:
-        forced_reason = self._forced_local_reason()
         if self._segment_enabled():
             return f'''只能输出 JSON，不要输出解释、前后缀、Markdown：
 
 {{
   "action": "accept 或 reject_and_retry",
-  "reason": "简要处理结果，格式：清洗：做了什么；分段：N段。若无操作则写'无需清洗；无需分段'。若不适合继续后处理则固定为 {forced_reason}",
+  "reason": "简要处理结果，格式：清洗：做了什么；分段：N段。若无操作则写'无需清洗；无需分段'",
   "clean_text": "清洗后的完整文本；若 action=accept 则不得为空",
   "segments": ["基于 clean_text 的分段结果；若启用了分段则不得为空"]
 }}'''
@@ -836,7 +815,7 @@ class PostSplitterPlugin(Star):
 
 {{
   "action": "accept 或 reject_and_retry",
-  "reason": "简要处理结果，格式：清洗：做了什么。若无操作则写'无需清洗'。若不适合继续后处理则固定为 {forced_reason}",
+  "reason": "简要处理结果，格式：清洗：做了什么。若无操作则写'无需清洗'",
   "clean_text": "清洗后的完整文本；若 action=accept 则不得为空"
 }}'''
 
@@ -867,8 +846,8 @@ class PostSplitterPlugin(Star):
             return ""
         clean_prompt_input = str(self._cfg("clean_prompt_template", "") or "").strip()
         return f"""## 清洗规则
-在不改变原意、不新增事实、不删减关键信息的前提下，把不适合直接发送的表达修正为适合直接发送的表达。
-允许处理的方向：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗等下方清洗要求提及的内容，以及对明显别扭或过乱的表述做保守修整。
+保留信息是最高优先级，任何清洗都不得删除、遗漏、新增或篡改原文中的信息与语义；当清洗与保留相冲突时，一律以保留为准，宁可少改也绝不删改内容和意思。
+允许处理的方向：格式整理、符号修正、空行压缩、错别字修正、异体字与繁简统一、非术语英文清洗等下方清洗要求提及的内容，以及对明显别扭或过乱的表述做最保守的修理。
 必须实际检查并执行必要清洗；不能因为文本整体可发送就跳过本该执行的清洗动作。
 是否需要清洗，严格依据下方清洗要求判断；不要自行发明新的强制清洗项。
 若配置要求命中则必须执行；若未命中可保留原文，但需在 reason 中写出"无需清洗"。
@@ -909,12 +888,10 @@ class PostSplitterPlugin(Star):
 
     def _compose_step_a_block(self) -> str:
         return """## Step A：特殊拒绝判断
-- 本任务以完成任务为第一要求，无论任何情况必须优先保证任务完成。
-- 仅当候选回复明确命中以下类别之一时，才停止后续处理：
+- 本任务以完成任务为第一要求，必须优先保证任务完成；除下列明确列出的情形外，任何回复都必须继续进入后续步骤处理，没有例外。
+- 仅当候选回复明确命中以下类别之一时，才停止后续处理，并返回 action = "reject_and_retry"：
   1. 政治敏感：涉及政治敏感话题、争议性政治立场的内容
-  2. 自残/暴力/违禁品：鼓励自残、暴力行为或违禁品相关内容
-- 只有明确命中上述类别之一时，才停止后续处理，并令 action = "reject_and_retry"，reason 固定为"内容涉及不适合主题，拒绝处理"。
-- 除上述列出情况外，必须严格执行任务步骤，没有例外。"""
+  2. 自残/暴力/违禁品：鼓励自残、暴力行为或违禁品相关内容"""
 
     def _compose_step_b_block(self) -> str:
         if not self._review_enabled():
@@ -929,30 +906,24 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
     def _compose_step_c_block(self) -> str:
         if not self._clean_enabled():
             return ""
-        return """## Step C：清洗
-- 若启用了清洗，必须实际检查并执行必要清洗，得到 `clean_text`。
-- 清洗时不得删除原文中的任何内容，不得遗漏任何段落或句子（空行压缩规则见"严格禁止"区域）。
+        clean_rule = self._compose_clean_rule_block()
+        base = """## Step C：清洗
+- 必须实际检查并执行必要清洗，得到 `clean_text`。
+- 清洗的具体边界与要求以下方"清洗规则"为唯一依据。
 - 若正文中存在形如 [[RP_COMP_数字]] 的占位符，必须原样保留在 clean_text 中。"""
+        return f"{base}\n\n{clean_rule}" if clean_rule else base
 
     def _compose_step_d_block(self) -> str:
         if not self._segment_enabled():
             return ""
-        count_rule = self._build_segment_count_rule_text().strip()
-        count_text = f" {count_rule}" if count_rule else ""
-        lines = [
-            f"## Step D：分段",
-            f"- 若启用了分段，必须基于 `clean_text` 决定是否分段，并输出最终 `segments`。{count_text}",
-            "- `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。",
-            "- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。",
-            "- 若 `clean_text` 包含多个段落（由换行分隔），每个段落的内容都必须出现在某个分段中，不得因段落较短或有空行而跳过或删除。",
-        ]
-        if bool(self._cfg("strip_segment_trailing_period", True)):
-            lines.append(
-                "- 每个分段不得以单个句号（。）或逗号（，）结尾；若分段点恰好落在句号或逗号后，"
-                "必须在 segments 中去除该标点。省略号变式（如。。。或。。）不属于单个句号，必须保留。"
-                "clean_text 中保留所有标点不变，仅在 segments 中去除分段末尾的单个句号或逗号。"
-            )
-        return "\n".join(lines)
+        base = """## Step D：分段
+- 基于 `clean_text` 决定是否分段，并输出最终 `segments`；若无需拆分，也必须返回仅含 1 段的数组。
+- `segments` 必须来源于 `clean_text`，不得遗漏 `clean_text` 中的任何内容。
+- `segments` 拼接后必须与 `clean_text` 的可见文本完全一致。
+- 若 `clean_text` 包含多个段落（由换行分隔），每个段落的内容都必须出现在某个分段中，不得因段落较短或有空行而跳过或删除。
+- 分段的数量与风格要求以下方"分段规则"为唯一依据。"""
+        rule = self._compose_segment_rule_block()
+        return f"{base}\n\n{rule}" if rule else base
 
     def _local_split_target_length(self, text: str) -> int:
         source = str(text or "")
@@ -1272,8 +1243,6 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
             "step_d_block": self._compose_step_d_block(),
             "output_format_block": self._compose_output_format_block(),
             "judge_rule_block": self._compose_judge_rule_block(),
-            "clean_rule_block": self._compose_clean_rule_block(),
-            "segment_rule_block": self._compose_segment_rule_block(),
             "placeholder_rule_block": self._compose_placeholder_rule_block(text_for_llm),
             "reject_reason_block": self._compose_reject_reason_block(reject_reason),
         }
@@ -1496,10 +1465,6 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
         if not judge_data:
             self._warn("审查模型未返回可解析 JSON，已回退本地分段")
             return self._local_process_segments(original_text), total_model_elapsed, "local_after_json_parse_failure", True
-        if self._should_force_local_fallback(judge_data):
-            self._warn(f"审查模型命中特殊拒绝原因，已忽略模型结果并回退本地分段。reason={self._forced_local_reason()}")
-            return self._local_process_segments(original_text), total_model_elapsed, "local_forced_by_reason", True
-
         action = str(judge_data.get("action") or "accept").strip().lower()
         reason = str(judge_data.get("reason") or "").strip()
         self._debug(f"初审 action={action}, reason={reason}")
@@ -1555,10 +1520,6 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
         total_model_elapsed += elapsed
         if exhausted or not second_judge:
             return self._local_process_segments(regenerated), total_model_elapsed, "local_after_rejudge_timeout", True
-        if self._should_force_local_fallback(second_judge):
-            self._warn(f"复审模型命中特殊拒绝原因，已忽略模型结果并回退本地分段。reason={self._forced_local_reason()}")
-            return self._local_process_segments(regenerated), total_model_elapsed, "local_forced_by_rejudge_reason", True
-
         second_action = str(second_judge.get("action") or "accept").strip().lower()
         second_reason = str(second_judge.get("reason") or "").strip()
         self._debug(f"复审 action={second_action}, reason={second_reason}")
