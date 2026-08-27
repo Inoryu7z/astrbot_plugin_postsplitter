@@ -130,6 +130,12 @@
   "type": "bool",
   "default": true
  },
+ "remove_newlines": {
+  "description": "去除换行符",
+  "hint": "开启后，本地去除回复正文中的所有换行符（含句中与空行），去除后再交给模型分段。代码块、URL 与富媒体占位符内的换行不受影响；换行两侧任一侧为英文/数字时补一个空格，其余情况直接拼接（换行前后已有标点不会产生粘连）。",
+  "type": "bool",
+  "default": false
+ },
  "enable_clean": {
   "description": "清洗",
   "hint": "按自定义规则对回复做格式整理、符号修正、错别字修正等轻量处理。",

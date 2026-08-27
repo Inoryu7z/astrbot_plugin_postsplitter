@@ -94,7 +94,7 @@ DEFAULT_RETRY_PROMPT = """# 任务
     "astrbot_plugin_postsplitter",
     "Inoryu7z",
     "基于 LLM 的回复后处理分段器：优先对回复做自然分段，并支持自定义清洗、审查与打回重生成。",
-    "1.5.7",
+    "1.5.8",
 )
 class PostSplitterPlugin(Star):
     URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -178,6 +178,9 @@ class PostSplitterPlugin(Star):
 
     def _segment_enabled(self) -> bool:
         return bool(self._cfg("enable_segment", True))
+
+    def _remove_newlines_enabled(self) -> bool:
+        return bool(self._cfg("remove_newlines", False))
 
     def _any_post_process_enabled(self) -> bool:
         return any([self._review_enabled(), self._clean_enabled(), self._segment_enabled()])
@@ -978,6 +981,65 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
             tokens.append(source[last:])
         return [token for token in tokens if token]
 
+    @staticmethod
+    def _is_ascii_alnum_char(char: str) -> bool:
+        """ASCII 字母或数字字符判断，用于换行两侧英文/数字边界的空格处理。"""
+        return bool(char) and char.isascii() and char.isalnum()
+
+    def _remove_newlines_in_plain(self, token: str) -> str:
+        """处理非原子文本片段内的换行去除。
+
+        边界规则：
+        - 换行符前或后已有其他字符时，仅当任一侧为 ASCII 字母/数字则补一个空格，
+          防止英文/数字单词粘连（如前一个字符已是空白则不重复补）；
+        - 其余情况直接拼接（换行前后若已有标点不会产生粘连）；
+        - 片段首尾的换行直接剥掉。
+        """
+        out: List[str] = []
+        i = 0
+        n = len(token)
+        while i < n:
+            if token[i] != "\n":
+                out.append(token[i])
+                i += 1
+                continue
+            j = i
+            while j < n and token[j] == "\n":
+                j += 1
+            left_char = out[-1] if out else ""
+            right_char = token[j] if j < n else ""
+            if (
+                left_char
+                and right_char
+                and (self._is_ascii_alnum_char(left_char) or self._is_ascii_alnum_char(right_char))
+                and not left_char.isspace()
+            ):
+                out.append(" ")
+            i = j
+        return "".join(out)
+
+    def _remove_newlines_local(self, text: str) -> str:
+        """本地去除正文中的所有换行符（含句中换行与空行）。
+
+        代码块 / URL / 富媒体占位符内部的换行受原子 token 保护，绝不动；
+        其余换行按 `_remove_newlines_in_plain` 的边界规则处理。
+        """
+        source = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        if "\n" not in source:
+            return source.strip()
+
+        tokens = self._local_tokenize(source)
+        if not tokens:
+            return source.strip()
+
+        chunks: List[str] = []
+        for token in tokens:
+            if self._local_is_atomic_token(token):
+                chunks.append(token)
+                continue
+            chunks.append(self._remove_newlines_in_plain(token))
+        return "".join(chunks).strip()
+
     def _merge_local_short_segments(self, segments: List[str], target_length: int) -> List[str]:
         normalized = [str(seg or "").strip() for seg in segments if str(seg or "").strip()]
         if not normalized:
@@ -1052,6 +1114,11 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
             return []
         if not self._segment_enabled():
             return [source]
+        # 可选：本地先去除所有换行符（含句中与空行），与模型路径行为保持一致
+        if self._remove_newlines_enabled():
+            source = self._remove_newlines_local(source).strip()
+            if not source:
+                return []
 
         target_length = self._local_split_target_length(source)
         tokens = self._local_tokenize(source)
@@ -1184,6 +1251,7 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
         - 走本地 fallback 分段逻辑，不调用后处理 LLM
         - 受 enable_segment 配置项控制，关闭时返回单段
         - 句号与逗号去除受 strip_segment_trailing_period 配置项控制
+        - 换行符去除受 remove_newlines 配置项控制（开启时先本地去除全部换行再分段）
         - 不受字数限制、白名单等前置闸门影响（由调用方自行判断）
         """
         if not text or not text.strip():
@@ -1231,6 +1299,9 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
 
         # 发送给 LLM 之前剥离尾部富媒体占位符，避免模型把占位符切为单独分段或与标点粘连成段
         text_for_llm, trailing_placeholders = self._extract_trailing_placeholders(reply_text)
+        # 可选：本地先去除所有换行符（含句中与空行），让分段完全交由语义与标点决定
+        if self._remove_newlines_enabled():
+            text_for_llm = self._remove_newlines_local(text_for_llm)
         if not text_for_llm.strip():
             # 防御性兜底：原文仅含占位符（正常应在 on_decorating_result 中被跳过）
             return {"action": "accept", "clean_text": reply_text, "segments": [reply_text]}, 0.0, False
@@ -1279,6 +1350,9 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
 
         # 发送给 LLM 之前剥离尾部富媒体占位符，避免模型在重写时误处理占位符
         text_for_llm, trailing_placeholders = self._extract_trailing_placeholders(reply_text)
+        # 与审查路径保持一致：本地先去除所有换行符（含句中与空行）
+        if self._remove_newlines_enabled():
+            text_for_llm = self._remove_newlines_local(text_for_llm)
 
         values = {
             "reply_text": text_for_llm,
