@@ -1700,6 +1700,15 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
                 if bool(self._cfg("strip_segment_trailing_period", True)):
                     segments_text = [self._strip_single_trailing_period(seg) for seg in segments_text]
 
+                # 输出侧兜底去换行：LLM（审查/分段模型）输出与段数合并过程仍可能产生换行，
+                # 开启 remove_newlines 时在发送前统一清除，确保最终分段内不残留任何换行符。
+                if self._remove_newlines_enabled():
+                    segments_text = [
+                        seg
+                        for seg in (self._remove_newlines_local(seg) for seg in segments_text)
+                        if seg
+                    ]
+
                 self._log_polished_output(plain_text, segments_text, process_elapsed, process_mode)
 
                 segments = self._build_segment_chains(event, segments_text, original_reply, placeholder_map)
