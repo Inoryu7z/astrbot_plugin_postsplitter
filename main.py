@@ -182,6 +182,14 @@ class PostSplitterPlugin(Star):
     def _remove_newlines_enabled(self) -> bool:
         return bool(self._cfg("remove_newlines", False))
 
+    def _segment_joiner(self, default: str) -> str:
+        """分段合并时使用的连接符。
+
+        合并发生在「去除换行符」之后，若仍注入 `\\n`/`\\n\\n`，会在最终分段里重新引入换行。
+        remove_newlines 开启时返回空串（直接拼接），关闭时保持原有连接符。
+        """
+        return "" if self._remove_newlines_enabled() else default
+
     def _any_post_process_enabled(self) -> bool:
         return any([self._review_enabled(), self._clean_enabled(), self._segment_enabled()])
 
@@ -417,11 +425,11 @@ class PostSplitterPlugin(Star):
         if target_count <= 0 or len(normalized) <= target_count:
             return normalized
         if target_count == 1:
-            merged = "\n\n".join(normalized).strip()
+            merged = self._segment_joiner("\n\n").join(normalized).strip()
             return [merged] if merged else []
 
         result = normalized[:]
-        joiner = "\n\n"
+        joiner = self._segment_joiner("\n\n")
 
         def pair_merge_score(left: str, right: str) -> Tuple[float, int]:
             left_text = str(left or "").strip()
@@ -1046,6 +1054,7 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
             return []
 
         min_len = 4 if target_length <= 0 else max(2, min(12, target_length // 3))
+        joiner = self._segment_joiner("\n")
         merged: List[str] = []
         for seg in normalized:
             visible_len = self._visible_len(seg)
@@ -1054,17 +1063,17 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
                 if self._ends_with_natural_boundary(seg):
                     merged.append(seg)
                     continue
-                connector = "" if re.match(r"^[。！？?!]", seg) else "\n"
+                connector = "" if re.match(r"^[。！？?!]", seg) else joiner
                 merged[-1] = f"{merged[-1]}{connector}{seg}".strip()
             else:
                 merged.append(seg)
 
         if len(merged) >= 2 and self._visible_len(merged[0]) < min_len:
-            merged[1] = f"{merged[0]}\n{merged[1]}".strip()
+            merged[1] = f"{merged[0]}{joiner}{merged[1]}".strip()
             merged = merged[1:]
 
         if len(merged) >= 2 and self._visible_len(merged[-1]) < min_len:
-            merged[-2] = f"{merged[-2]}\n{merged[-1]}".strip()
+            merged[-2] = f"{merged[-2]}{joiner}{merged[-1]}".strip()
             merged = merged[:-1]
 
         return merged
@@ -1251,16 +1260,27 @@ Step A 仅负责内容安全审查（政治/暴力），不处理格式与风格
         - 走本地 fallback 分段逻辑，不调用后处理 LLM
         - 受 enable_segment 配置项控制，关闭时返回单段
         - 句号与逗号去除受 strip_segment_trailing_period 配置项控制
-        - 换行符去除受 remove_newlines 配置项控制（开启时先本地去除全部换行再分段）
+        - 换行符去除受 remove_newlines 配置项控制（开启时输入侧去换行后再分段，
+          输出侧再做一次兜底去换行，确保返回的分段内不含换行符）
         - 不受字数限制、白名单等前置闸门影响（由调用方自行判断）
         """
         if not text or not text.strip():
             return []
         if not self._segment_enabled():
-            return [text.strip()]
+            # 分段关闭时同样执行去换行，避免调用方拿到仍带换行的原文
+            single = (
+                self._remove_newlines_local(text).strip()
+                if self._remove_newlines_enabled()
+                else text.strip()
+            )
+            return [single] if single else []
         segments = self._local_split_text(text)
         if bool(self._cfg("strip_segment_trailing_period", True)):
             segments = [self._strip_single_trailing_period(seg) for seg in segments]
+        # 输出侧兜底去换行：分段合并（短段并入 / 段数上限重平衡）仍可能注入换行，
+        # 与事件管道的 on_decorating_result 保持一致，确保返回给调用方的分段不含换行符。
+        if self._remove_newlines_enabled():
+            segments = [self._remove_newlines_local(seg) for seg in segments]
         return [seg for seg in segments if seg and seg.strip()]
 
     def get_segment_delay_external(self, text: str) -> float:
